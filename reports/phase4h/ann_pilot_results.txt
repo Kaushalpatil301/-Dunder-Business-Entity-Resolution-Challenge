@@ -1,0 +1,12 @@
+PHASE 4H — DENSE ANN PILOT
+============================================================
+Model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+S2 rows: 100000
+S3 rows: 100000
+Queries: 2000
+Dimension: 384
+
+K=25: recall=1.978144%, recovered=143, truth=7229, complete=1
+K=50: recall=2.033476%, recovered=147, truth=7229, complete=1
+K=100: recall=2.061143%, recovered=149, truth=7229, complete=1
+K=200: recall=2.061143%, recovered=149, truth=7229, complete=1

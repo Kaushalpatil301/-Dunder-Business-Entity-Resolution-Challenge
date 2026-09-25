@@ -261,21 +261,37 @@ def generate_token_candidates(
 
     print()
     print("=" * 70)
-    print("GENERATING RARE-TOKEN CANDIDATES")
+    print("PHASE 4C - SELECTIVE RARE-TOKEN BLOCKING")
     print("=" * 70)
 
     s2_token_index = s2_index["index"]
     s3_token_index = s3_index["index"]
 
-    # Aggregate statistics only.
-    # We deliberately DO NOT keep all candidates in memory.
+    # Test several posting-list/document-frequency caps.
+    thresholds = [
+        100,
+        250,
+        500,
+        1_000,
+        2_500,
+        5_000,
+        10_000,
+        25_000,
+    ]
+
+    # Statistics for each threshold.
+    stats = {
+        threshold: {
+            "recovered_links": 0,
+            "complete_entities": 0,
+            "candidate_counts": [],
+        }
+        for threshold in thresholds
+    }
+
     total_rows = 0
     matched_entities = 0
     total_truth_links = 0
-    recovered_links = 0
-    complete_entities = 0
-
-    candidate_counts = []
 
     for chunk in pd.read_csv(
         s1_path,
@@ -290,8 +306,6 @@ def generate_token_candidates(
 
             s1_id = row.entity_id
 
-            # We only need to evaluate entities that have
-            # positive matches in the validation ground truth.
             true_matches = truth.get(s1_id)
 
             if true_matches is None:
@@ -300,45 +314,78 @@ def generate_token_candidates(
             matched_entities += 1
             total_truth_links += len(true_matches)
 
-            # Generate candidates ONLY for this one S1 entity.
-            candidates = set()
-
             tokens = set(
                 tokenize_name(row.name_tokens)
             )
 
+            # One candidate set per threshold.
+            candidates_by_threshold = {
+                threshold: set()
+                for threshold in thresholds
+            }
+
             for token in tokens:
 
-                # S2 candidates
-                for candidate_id in s2_token_index.get(
+                s2_postings = s2_token_index.get(
                     token,
                     [],
-                ):
-                    candidates.add(candidate_id)
+                )
 
-                # S3 candidates
-                for candidate_id in s3_token_index.get(
+                s3_postings = s3_token_index.get(
                     token,
                     [],
-                ):
-                    candidates.add(candidate_id)
+                )
 
-            # Evaluate immediately.
-            candidate_counts.append(
-                len(candidates)
-            )
+                # IMPORTANT:
+                # The threshold is applied to the combined
+                # posting frequency of the token.
+                token_df = (
+                    len(s2_postings)
+                    + len(s3_postings)
+                )
 
-            recovered = (
-                true_matches & candidates
-            )
+                for threshold in thresholds:
 
-            recovered_links += len(recovered)
+                    if token_df > threshold:
+                        continue
 
-            if recovered == true_matches:
-                complete_entities += 1
+                    candidates = candidates_by_threshold[
+                        threshold
+                    ]
 
-            # `candidates` is discarded here before moving
-            # to the next S1 entity.
+                    candidates.update(
+                        s2_postings
+                    )
+
+                    candidates.update(
+                        s3_postings
+                    )
+
+            # Evaluate every threshold immediately.
+            for threshold in thresholds:
+
+                candidates = candidates_by_threshold[
+                    threshold
+                ]
+
+                stats[threshold][
+                    "candidate_counts"
+                ].append(
+                    len(candidates)
+                )
+
+                recovered = (
+                    true_matches & candidates
+                )
+
+                stats[threshold][
+                    "recovered_links"
+                ] += len(recovered)
+
+                if recovered == true_matches:
+                    stats[threshold][
+                        "complete_entities"
+                    ] += 1
 
         total_rows += len(chunk)
 
@@ -347,17 +394,9 @@ def generate_token_candidates(
             f"{total_rows:,}"
         )
 
-    series = pd.Series(candidate_counts)
-
-    recall = (
-        recovered_links / total_truth_links
-        if total_truth_links
-        else 0.0
-    )
-
     print()
     print("=" * 70)
-    print("RARE-TOKEN BLOCKING RESULTS")
+    print("PHASE 4C RESULTS")
     print("=" * 70)
 
     print(
@@ -370,46 +409,67 @@ def generate_token_candidates(
         f"{total_truth_links:,}"
     )
 
-    print(
-        f"Recovered true links: "
-        f"{recovered_links:,}"
-    )
+    print()
 
     print(
-        f"Candidate recall: "
-        f"{recall:.6%}"
+        f"{'DF Cap':>10} "
+        f"{'Recall':>12} "
+        f"{'Complete':>12} "
+        f"{'Mean':>12} "
+        f"{'Median':>12} "
+        f"{'P95':>12} "
+        f"{'Max':>12}"
     )
 
-    print(
-        f"Entities with all true links recovered: "
-        f"{complete_entities:,}"
-    )
+    print("-" * 88)
+
+    for threshold in thresholds:
+
+        recovered_links = stats[
+            threshold
+        ]["recovered_links"]
+
+        complete_entities = stats[
+            threshold
+        ]["complete_entities"]
+
+        candidate_counts = stats[
+            threshold
+        ]["candidate_counts"]
+
+        series = pd.Series(
+            candidate_counts
+        )
+
+        recall = (
+            recovered_links
+            / total_truth_links
+            if total_truth_links
+            else 0.0
+        )
+
+        print(
+            f"{threshold:>10,} "
+            f"{recall:>11.6%} "
+            f"{complete_entities:>12,} "
+            f"{series.mean():>12.2f} "
+            f"{series.median():>12.2f} "
+            f"{series.quantile(0.95):>12.2f} "
+            f"{series.max():>12,}"
+        )
 
     print()
-    print("Candidate counts:")
-
-    if candidate_counts:
-
-        print(
-            f"Mean:   {series.mean():.2f}"
-        )
-
-        print(
-            f"Median: {series.median():.2f}"
-        )
-
-        print(
-            f"P95:    {series.quantile(0.95):.2f}"
-        )
-
-        print(
-            f"Max:    {series.max():,}"
-        )
-
-    else:
-
-        print("No matched validation entities found.")
-
+    print(
+        "Interpretation:"
+    )
+    print(
+        "Lower DF caps produce smaller candidate sets "
+        "but may reduce recall."
+    )
+    print(
+        "Higher DF caps improve recall but increase "
+        "downstream matching cost."
+    )
 
 
 def evaluate_candidates(
