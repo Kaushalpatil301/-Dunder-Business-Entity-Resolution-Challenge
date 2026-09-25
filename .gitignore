@@ -1,6 +1,7 @@
 # Large data files (exceed GitHub 100MB limit — keep local only)
 dataset/
 output/
+context/
 
 # macOS
 .DS_Store
