@@ -30,6 +30,8 @@ env/
 .idea/
 *.swp
 *.swo
+*.tsv
+/data
 
 # OS
 Thumbs.db
