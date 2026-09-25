@@ -1,0 +1,60 @@
+======================================================================
+PHASE 1 EDA -- Amazon ML Challenge 2026
+======================================================================
+
+[1] Loading files ...
+
+[2] RECORD COUNTS
+  S1: 2,206,821 records
+  S2: 5,034,616 records
+  S3: 5,285,603 records
+
+[3] COUNTRY SPLIT (S1 -- reference set)
+  'US'           : 1,323,633  (59.98%)
+  'India'        :  883,188  (40.02%)
+
+[4] MATCH CARDINALITY DISTRIBUTION (from train_ground_truth.tsv)
+  Total S1 entities in GT: 2,206,821
+  Singletons (0 matches):   123,247  (5.58%)
+  1-match:                  119,157  (5.40%)
+  Multi-match (>1):        1,964,417  (89.02%)
+  Max matches (one entity):      11
+  Mean matches per entity:      3.4613
+
+[5] TARGET-SIDE UNIQUENESS CHECK (gates linear_sum_assignment eligibility)
+  S2 IDs in GT: 3,693,619  |  duplicated: 0  |  unique=True
+  S3 IDs in GT: 3,944,746  |  duplicated: 0  |  unique=True
+  -> TARGET-SIDE UNIQUENESS HOLDS for both S2 and S3.
+     linear_sum_assignment is ELIGIBLE pending error-analysis in Phase 8.
+
+[6] NOISY TRUE-PAIR SAMPLE (up to 25 rows -- for Phase 3 spot-check)
+       s1_id    target_id s1_country                                    s1_name                                      tgt_name                                                                                               s1_addr                                                                                tgt_addr
+S1-341462203 S2-219553948      India          Baba Technologies Private Limited            Baba టెక్నాలజీస్ ప్రైవేట్ లిమిటెడ్                      37-90 Squaradeal, Defence Colony Sainikapuri, Secunderabad, Hyderabad, Telangana           NO 37-90 SQUARADEAL, DEFENCE COLONY SAINIKAPURI, SECUNDERABAD, Andhra Pradesh
+S1-783955316 S3-656241763      India                             Kisan Avas Ltd                               Kisan Avas Ltd.                                                   6/161 S 2, Rajender Nagar, Ghaziabad, Uttar Pradesh                                                      उत्तर प्रदेश, 7/161 S 2, Ghaziabad
+S1-313221336 S3-872559960         US                       Studio 74 Book Store                          Studio 74 BOOK Store                                                                  2628 Mariposa Drive, Terre Haute, IN                                                 Indiana, 02628 Mariposa Dr, Terre Ahute
+S1-516394603 S2-642842175         US                     Bay Creative Stone LLC                       Bay Creative Sthoen LLC                                                 4018 Annapolis Road, Unit APARTMENT B, Halethorpe, MD                                                      4018- Annapolis Rd, HALETHORPE, MD
+S1-887045319 S2-612158384      India     Construction Vr Certifications Pvt Ltd      C0nstruction Vr Certhificatidons Pvt Ltd                          H.No1-8-67/P Apiic Kamalanagar, Kushaiguda, Hyderabad, Rangareddy, Telangana                          #1-8-67/P APIIC KAMALANAGAR, KUSHAIGUDA, RANGAREDDY, Telangana
+ S1-21082318 S2-234787766         US                             Eye Clinic LLC                                LLC Eye Clinic                                                              2475 Pecos Road, Unit 2098, Chandler, AZ                                                   2475 Pecos Road, ANDERSEN SPRINGS, AZ
+S1-214543067 S2-416909923         US                        Nieto Algonquin LLC                           Nieto Álgonquin LLC                                                                  225 Wolf Trail, Berkeley Springs, WV                                                 BEKELEY SPRINGS CDP, WV, 225 WOLF TRAIL
+S1-180257062 S3-618488662         US             Alexandria Hunger Rapid League               Alexandria  Hunger Rapid League                                                                        1821 Aga Drive, Alexandria, MN                                                  1821. Aga Drive, Aelxandria, Minnesota
+S1-151440370 S2-918927342      India                  Shlok Electronics Pvt Ltd                             SHLOK ELECTRONICS                                  S. No. 192/5, Office 03, Arambh, Nr. Datta Mandir, Pune, Maharashtra                    S. NO. 192/5, OFFICE 03, ARAMBH, NR. DATTA MANDIR, PUNE, Maharashtra
+S1-241438014 S3-828994416         US                           Evans Pediatrics                           Evans  (Pediatrics)                                                             1600 2nd West Hill Drive, Great Falls, MT                                             1600 2nd West Hill Dr, Great Falls, Montana
+ S1-61084401 S3-905700617         US                 Urology Horizon Health LLC                *** UROLOGY HORIZON HEALTH LLC                                                                           Sunset, AR, 4120 Highway 77                                                      #4120 Highway 77, Marion, Arkansas
+S1-957558089 S3-583741602         US                         The Dent Cafe Inc.                            The Cafe Dent Inc.                                                                          165 Clearview Road, Eden, NC                                                279 Clearview Road, Eden, North Carolina
+S1-528651403   S3-7289261         US              Aloysia Damico Generation Inc                 Aloysia Generation Damico Inc                                                                    2337 Pendragon Road, Kingsport, TN                                               ##2337 Pendragon Rd, Kingsport, Tennessee
+S1-815044399 S3-294159911         US             Henderson Federal Sciences Inc                             Henderson Féderal                                                                          1522 E 7th Road, Lostant, IL                                                     1522 East 7nd Rd, Lostant, Illinois
+S1-715861166 S2-705665414      India                             FF Realcon LLP                                FF REALCON LLP                               C 06 Apmc Market I Phase Ii Sector 19, Turbhe Vashi, Thane, Maharashtra                महाराष्ट्र, C ##06 APMC MARKET I PHASE II SECTOR 19, TURBHE VASHI, THANE
+S1-322698341 S3-430209411      India                    My Blue Exports Pvt Ltd                  My Blue Pvt Pvt Ltd Services                                                         At Post Tanahali Tal Indi, Bijapur, Karnataka                                    Bijapur, ಕರ್ನಾಟಕ, Bijapur, At Post Tanahali Tal Indi
+S1-204545711 S2-347900826         US Chiropractic Care Associates of Pittsfield CHIROPRACTIC CARE ASSOCIATES OF PITTSFIELD LP                                                            50 Bartlett Avenue, Unit 2, Pittsfield, MA                                                        50. BARTLETT AVE, PITTSFIELD, MA
+S1-305970695 S3-582801494         US              Straight Edge Book Store P.C.                      Straight Edge Book Store                                           3035 River Birch Drive, Unit Unit A, City Of Brookfield, WI                              3035 River Birch Drive, Unit Unit A, Brookfield, Wisconsin
+S1-742019967  S2-48286361      India                        Encore Cabs Pvt Ltd                      Sri ENCORE CABS PVT LTD.            S-1 Unit, Second Floor, Anr Centre No. 137, Road No.1, Banjara Hills, Hyderabad, Telangana        S-#1 UNIT, SECOND FLOOR, ANR CENTRE NO. 137, ROAD NO.1, BANJARA HILLS, Telangana
+S1-433108657 S2-677618114      India          Royal Consultancy Private Limited        Smt ROYAL CONSULTANCY  PRIVATE LIMITED Mumbai City, C/O City Light Cinema, Ashford Chambers, Lady Jamshedji Road, Mahim, Mumbai, Maharashtra C/O CITY LIGHT CINEMA, ASHFORD CHAMBERS, LAY JAMSHEDJI ROAD, MAHIM, MUMBAI, Maharashtra
+S1-511316240 S2-164427228         US               Margolies Apex Hovnanian Inc              -- Margolies  Apex Hovnanian Inc                                                                        182 Sherwood Road, Newport, NC                                                        182-184 SHERWOOD RD, NEWPORT, NC
+S1-830748063 S2-104060035         US                       Everage and Rice LLC                       Everage and Rice L.L.C.                                                            12700 Constitution Avenue, Albuquerque, NM                                                                                        
+S1-188088618 S2-436753046         US             Wallace, Zhang & Concepcion Co                   WALLACE, ZHANG & CONCEPCION                                                                 NC, Youngsville, 5933 Jack Jones Road                                                   5933 JACK JONES ROAD, NC, YOUNGSVILLE
+S1-943181166 S3-182732453         US                            Red Hair Studio                        Red Hair Studio Center                                                         6855 Nyberg Street, Unit #J-101, Tualatin, OR                                              6855 Nyberg St, # #J-101, Tualatin, Oregon
+S1-931194776 S3-556020575         US                   Wainscott Petroleum Inc.                      Inc. Wainscott Petroleum                                                                      453 Kindra Court, Cottonwood, AZ                                           453 Kindra Court, <NULL>, Cottonwood, Arizona
+
+======================================================================
+END OF PHASE 1 EDA
+======================================================================

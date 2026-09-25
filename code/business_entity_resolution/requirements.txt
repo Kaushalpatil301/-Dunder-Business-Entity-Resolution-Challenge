@@ -1,9 +1,15 @@
-# Pinned dependencies — update versions as you finalize your solution
+# Pinned dependencies — exact environment for reproducing the solution
 
+# Core data stack
 pandas==2.2.2
 numpy==1.26.4
+
+# ML
 scikit-learn==1.5.0
-# Add more as needed, e.g.:
-# torch==2.3.0
-# sentence-transformers==3.0.1
-# rapidfuzz==3.9.3
+lightgbm==4.3.0
+
+# String similarity (C++ speed — critical for Phase 5)
+rapidfuzz==3.9.3
+
+# Config
+pyyaml==6.0.1

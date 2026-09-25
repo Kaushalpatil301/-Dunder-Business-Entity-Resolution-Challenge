@@ -1,0 +1,407 @@
+================================================================================
+PHASE 3 GATE -- Normalization Spot-Check (25 known true pairs)
+================================================================================
+
+--- Pair 01: S1-341462203  <->  S2-219553948 ---
+  [business_name]
+    RAW S1 : Baba Technologies Private Limited
+    RAW TGT: Baba టెక్నాలజీస్ ప్రైవేట్ లిమిటెడ్
+    lower     : S1='baba technologies private limited'  !=  TGT='baba టకనలజస పరవట లమటడ'
+    alphanum  : S1='baba technologies private limited'  !=  TGT='baba'
+    sorted    : S1='baba limited private technologies'  !=  TGT='baba'
+    expanded  : S1='baba technologies private limited'  !=  TGT='baba'
+  [business_address]
+    RAW S1 : 37-90 Squaradeal, Defence Colony Sainikapuri, Secunderabad, Hyderabad, Telangana
+    RAW TGT: NO 37-90 SQUARADEAL, DEFENCE COLONY SAINIKAPURI, SECUNDERABAD, Andhra Pradesh
+    lower     : S1='37-90 squaradeal, defence colony sainikapuri, secunderabad, hyderabad, telangana'  !=  TGT='no 37-90 squaradeal, defence colony sainikapuri, secunderabad, andhra pradesh'
+    alphanum  : S1='37 90 squaradeal defence colony sainikapuri secunderabad hyderabad telangana'  !=  TGT='no 37 90 squaradeal defence colony sainikapuri secunderabad andhra pradesh'
+    sorted    : S1='37 90 colony defence hyderabad sainikapuri secunderabad squaradeal telangana'  !=  TGT='37 90 andhra colony defence no pradesh sainikapuri secunderabad squaradeal'
+    expanded  : S1='37 90 squaradeal defence colony sainikapuri secunderabad hyderabad telangana'  !=  TGT='no 37 90 squaradeal defence colony sainikapuri secunderabad andhra pradesh'
+
+--- Pair 02: S1-783955316  <->  S3-656241763 ---
+  [business_name]
+    RAW S1 : Kisan Avas Ltd
+    RAW TGT: Kisan Avas Ltd.
+    lower     : S1='kisan avas ltd'  !=  TGT='kisan avas ltd.'
+    alphanum  : S1='kisan avas ltd'  ==  TGT='kisan avas ltd'
+    sorted    : S1='avas kisan ltd'  ==  TGT='avas kisan ltd'
+    expanded  : S1='kisan avas limited'  ==  TGT='kisan avas limited'
+  [business_address]
+    RAW S1 : 6/161 S 2, Rajender Nagar, Ghaziabad, Uttar Pradesh
+    RAW TGT: उत्तर प्रदेश, 7/161 S 2, Ghaziabad
+    lower     : S1='6/161 s 2, rajender nagar, ghaziabad, uttar pradesh'  !=  TGT='उततर परदश, 7/161 s 2, ghaziabad'
+    alphanum  : S1='6 161 s 2 rajender nagar ghaziabad uttar pradesh'  !=  TGT='7 161 s 2 ghaziabad'
+    sorted    : S1='161 2 6 ghaziabad nagar pradesh rajender s uttar'  !=  TGT='161 2 7 ghaziabad s'
+    expanded  : S1='6 161 s 2 rajender nagar ghaziabad uttar pradesh'  !=  TGT='7 161 s 2 ghaziabad'
+
+--- Pair 03: S1-313221336  <->  S3-872559960 ---
+  [business_name]
+    RAW S1 : Studio 74 Book Store
+    RAW TGT: Studio 74 BOOK Store
+    lower     : S1='studio 74 book store'  ==  TGT='studio 74 book store'
+    alphanum  : S1='studio 74 book store'  ==  TGT='studio 74 book store'
+    sorted    : S1='74 book store studio'  ==  TGT='74 book store studio'
+    expanded  : S1='studio 74 book store'  ==  TGT='studio 74 book store'
+  [business_address]
+    RAW S1 : 2628 Mariposa Drive, Terre Haute, IN
+    RAW TGT: Indiana, 02628 Mariposa Dr, Terre Ahute
+    lower     : S1='2628 mariposa drive, terre haute, in'  !=  TGT='indiana, 02628 mariposa dr, terre ahute'
+    alphanum  : S1='2628 mariposa drive terre haute in'  !=  TGT='indiana 02628 mariposa dr terre ahute'
+    sorted    : S1='2628 drive haute in mariposa terre'  !=  TGT='02628 ahute dr indiana mariposa terre'
+    expanded  : S1='2628 mariposa drive terre haute indiana'  !=  TGT='indiana 02628 mariposa drive terre ahute'
+
+--- Pair 04: S1-516394603  <->  S2-642842175 ---
+  [business_name]
+    RAW S1 : Bay Creative Stone LLC
+    RAW TGT: Bay Creative Sthoen LLC
+    lower     : S1='bay creative stone llc'  !=  TGT='bay creative sthoen llc'
+    alphanum  : S1='bay creative stone llc'  !=  TGT='bay creative sthoen llc'
+    sorted    : S1='bay creative llc stone'  !=  TGT='bay creative llc sthoen'
+    expanded  : S1='bay creative stone llc'  !=  TGT='bay creative sthoen llc'
+  [business_address]
+    RAW S1 : 4018 Annapolis Road, Unit APARTMENT B, Halethorpe, MD
+    RAW TGT: 4018- Annapolis Rd, HALETHORPE, MD
+    lower     : S1='4018 annapolis road, unit apartment b, halethorpe, md'  !=  TGT='4018- annapolis rd, halethorpe, md'
+    alphanum  : S1='4018 annapolis road unit apartment b halethorpe md'  !=  TGT='4018 annapolis rd halethorpe md'
+    sorted    : S1='4018 annapolis apartment b halethorpe md road unit'  !=  TGT='4018 annapolis halethorpe md rd'
+    expanded  : S1='4018 annapolis road unit apartment b halethorpe maryland'  !=  TGT='4018 annapolis road halethorpe maryland'
+
+--- Pair 05: S1-887045319  <->  S2-612158384 ---
+  [business_name]
+    RAW S1 : Construction Vr Certifications Pvt Ltd
+    RAW TGT: C0nstruction Vr Certhificatidons Pvt Ltd
+    lower     : S1='construction vr certifications pvt ltd'  !=  TGT='c0nstruction vr certhificatidons pvt ltd'
+    alphanum  : S1='construction vr certifications pvt ltd'  !=  TGT='c0nstruction vr certhificatidons pvt ltd'
+    sorted    : S1='certifications construction ltd pvt vr'  !=  TGT='c0nstruction certhificatidons ltd pvt vr'
+    expanded  : S1='construction vr certifications private limited'  !=  TGT='c0nstruction vr certhificatidons private limited'
+  [business_address]
+    RAW S1 : H.No1-8-67/P Apiic Kamalanagar, Kushaiguda, Hyderabad, Rangareddy, Telangana
+    RAW TGT: #1-8-67/P APIIC KAMALANAGAR, KUSHAIGUDA, RANGAREDDY, Telangana
+    lower     : S1='h.no1-8-67/p apiic kamalanagar, kushaiguda, hyderabad, rangareddy, telangana'  !=  TGT='#1-8-67/p apiic kamalanagar, kushaiguda, rangareddy, telangana'
+    alphanum  : S1='h no1 8 67 p apiic kamalanagar kushaiguda hyderabad rangareddy telangana'  !=  TGT='1 8 67 p apiic kamalanagar kushaiguda rangareddy telangana'
+    sorted    : S1='67 8 apiic h hyderabad kamalanagar kushaiguda no1 p rangareddy telangana'  !=  TGT='1 67 8 apiic kamalanagar kushaiguda p rangareddy telangana'
+    expanded  : S1='hno1 8 67 p apiic kamalanagar kushaiguda hyderabad rangareddy telangana'  !=  TGT='1 8 67 p apiic kamalanagar kushaiguda rangareddy telangana'
+
+--- Pair 06: S1-21082318  <->  S2-234787766 ---
+  [business_name]
+    RAW S1 : Eye Clinic LLC
+    RAW TGT: LLC Eye Clinic
+    lower     : S1='eye clinic llc'  !=  TGT='llc eye clinic'
+    alphanum  : S1='eye clinic llc'  !=  TGT='llc eye clinic'
+    sorted    : S1='clinic eye llc'  ==  TGT='clinic eye llc'
+    expanded  : S1='eye clinic llc'  !=  TGT='llc eye clinic'
+  [business_address]
+    RAW S1 : 2475 Pecos Road, Unit 2098, Chandler, AZ
+    RAW TGT: 2475 Pecos Road, ANDERSEN SPRINGS, AZ
+    lower     : S1='2475 pecos road, unit 2098, chandler, az'  !=  TGT='2475 pecos road, andersen springs, az'
+    alphanum  : S1='2475 pecos road unit 2098 chandler az'  !=  TGT='2475 pecos road andersen springs az'
+    sorted    : S1='2098 2475 az chandler pecos road unit'  !=  TGT='2475 andersen az pecos road springs'
+    expanded  : S1='2475 pecos road unit 2098 chandler arizona'  !=  TGT='2475 pecos road andersen springs arizona'
+
+--- Pair 07: S1-214543067  <->  S2-416909923 ---
+  [business_name]
+    RAW S1 : Nieto Algonquin LLC
+    RAW TGT: Nieto Álgonquin LLC
+    lower     : S1='nieto algonquin llc'  ==  TGT='nieto algonquin llc'
+    alphanum  : S1='nieto algonquin llc'  ==  TGT='nieto algonquin llc'
+    sorted    : S1='algonquin llc nieto'  ==  TGT='algonquin llc nieto'
+    expanded  : S1='nieto algonquin llc'  ==  TGT='nieto algonquin llc'
+  [business_address]
+    RAW S1 : 225 Wolf Trail, Berkeley Springs, WV
+    RAW TGT: BEKELEY SPRINGS CDP, WV, 225 WOLF TRAIL
+    lower     : S1='225 wolf trail, berkeley springs, wv'  !=  TGT='bekeley springs cdp, wv, 225 wolf trail'
+    alphanum  : S1='225 wolf trail berkeley springs wv'  !=  TGT='bekeley springs cdp wv 225 wolf trail'
+    sorted    : S1='225 berkeley springs trail wolf wv'  !=  TGT='225 bekeley cdp springs trail wolf wv'
+    expanded  : S1='225 wolf trail berkeley springs west virginia'  !=  TGT='bekeley springs cdp west virginia 225 wolf trail'
+
+--- Pair 08: S1-180257062  <->  S3-618488662 ---
+  [business_name]
+    RAW S1 : Alexandria Hunger Rapid League
+    RAW TGT: Alexandria  Hunger Rapid League
+    lower     : S1='alexandria hunger rapid league'  ==  TGT='alexandria hunger rapid league'
+    alphanum  : S1='alexandria hunger rapid league'  ==  TGT='alexandria hunger rapid league'
+    sorted    : S1='alexandria hunger league rapid'  ==  TGT='alexandria hunger league rapid'
+    expanded  : S1='alexandria hunger rapid league'  ==  TGT='alexandria hunger rapid league'
+  [business_address]
+    RAW S1 : 1821 Aga Drive, Alexandria, MN
+    RAW TGT: 1821. Aga Drive, Aelxandria, Minnesota
+    lower     : S1='1821 aga drive, alexandria, mn'  !=  TGT='1821. aga drive, aelxandria, minnesota'
+    alphanum  : S1='1821 aga drive alexandria mn'  !=  TGT='1821 aga drive aelxandria minnesota'
+    sorted    : S1='1821 aga alexandria drive mn'  !=  TGT='1821 aelxandria aga drive minnesota'
+    expanded  : S1='1821 aga drive alexandria minnesota'  !=  TGT='1821 aga drive aelxandria minnesota'
+
+--- Pair 09: S1-151440370  <->  S2-918927342 ---
+  [business_name]
+    RAW S1 : Shlok Electronics Pvt Ltd
+    RAW TGT: SHLOK ELECTRONICS
+    lower     : S1='shlok electronics pvt ltd'  !=  TGT='shlok electronics'
+    alphanum  : S1='shlok electronics pvt ltd'  !=  TGT='shlok electronics'
+    sorted    : S1='electronics ltd pvt shlok'  !=  TGT='electronics shlok'
+    expanded  : S1='shlok electronics private limited'  !=  TGT='shlok electronics'
+  [business_address]
+    RAW S1 : S. No. 192/5, Office 03, Arambh, Nr. Datta Mandir, Pune, Maharashtra
+    RAW TGT: S. NO. 192/5, OFFICE 03, ARAMBH, NR. DATTA MANDIR, PUNE, Maharashtra
+    lower     : S1='s. no. 192/5, office 03, arambh, nr. datta mandir, pune, maharashtra'  ==  TGT='s. no. 192/5, office 03, arambh, nr. datta mandir, pune, maharashtra'
+    alphanum  : S1='s no 192 5 office 03 arambh nr datta mandir pune maharashtra'  ==  TGT='s no 192 5 office 03 arambh nr datta mandir pune maharashtra'
+    sorted    : S1='03 192 5 arambh datta maharashtra mandir no nr office pune s'  ==  TGT='03 192 5 arambh datta maharashtra mandir no nr office pune s'
+    expanded  : S1='s no 192 5 office 03 arambh nr datta mandir pune maharashtra'  ==  TGT='s no 192 5 office 03 arambh nr datta mandir pune maharashtra'
+
+--- Pair 10: S1-241438014  <->  S3-828994416 ---
+  [business_name]
+    RAW S1 : Evans Pediatrics
+    RAW TGT: Evans  (Pediatrics)
+    lower     : S1='evans pediatrics'  !=  TGT='evans (pediatrics)'
+    alphanum  : S1='evans pediatrics'  ==  TGT='evans pediatrics'
+    sorted    : S1='evans pediatrics'  ==  TGT='evans pediatrics'
+    expanded  : S1='evans pediatrics'  ==  TGT='evans pediatrics'
+  [business_address]
+    RAW S1 : 1600 2nd West Hill Drive, Great Falls, MT
+    RAW TGT: 1600 2nd West Hill Dr, Great Falls, Montana
+    lower     : S1='1600 2nd west hill drive, great falls, mt'  !=  TGT='1600 2nd west hill dr, great falls, montana'
+    alphanum  : S1='1600 2nd west hill drive great falls mt'  !=  TGT='1600 2nd west hill dr great falls montana'
+    sorted    : S1='1600 2nd drive falls great hill mt west'  !=  TGT='1600 2nd dr falls great hill montana west'
+    expanded  : S1='1600 2nd west hill drive great falls montana'  ==  TGT='1600 2nd west hill drive great falls montana'
+
+--- Pair 11: S1-61084401  <->  S3-905700617 ---
+  [business_name]
+    RAW S1 : Urology Horizon Health LLC
+    RAW TGT: *** UROLOGY HORIZON HEALTH LLC
+    lower     : S1='urology horizon health llc'  ==  TGT='urology horizon health llc'
+    alphanum  : S1='urology horizon health llc'  ==  TGT='urology horizon health llc'
+    sorted    : S1='health horizon llc urology'  ==  TGT='health horizon llc urology'
+    expanded  : S1='urology horizon health llc'  ==  TGT='urology horizon health llc'
+  [business_address]
+    RAW S1 : Sunset, AR, 4120 Highway 77
+    RAW TGT: #4120 Highway 77, Marion, Arkansas
+    lower     : S1='sunset, ar, 4120 highway 77'  !=  TGT='#4120 highway 77, marion, arkansas'
+    alphanum  : S1='sunset ar 4120 highway 77'  !=  TGT='4120 highway 77 marion arkansas'
+    sorted    : S1='4120 77 ar highway sunset'  !=  TGT='4120 77 arkansas highway marion'
+    expanded  : S1='sunset arkansas 4120 highway 77'  !=  TGT='4120 highway 77 marion arkansas'
+
+--- Pair 12: S1-957558089  <->  S3-583741602 ---
+  [business_name]
+    RAW S1 : The Dent Cafe Inc.
+    RAW TGT: The Cafe Dent Inc.
+    lower     : S1='the dent cafe inc.'  !=  TGT='the cafe dent inc.'
+    alphanum  : S1='the dent cafe inc'  !=  TGT='the cafe dent inc'
+    sorted    : S1='cafe dent inc the'  ==  TGT='cafe dent inc the'
+    expanded  : S1='the dent cafe incorporated'  !=  TGT='the cafe dent incorporated'
+  [business_address]
+    RAW S1 : 165 Clearview Road, Eden, NC
+    RAW TGT: 279 Clearview Road, Eden, North Carolina
+    lower     : S1='165 clearview road, eden, nc'  !=  TGT='279 clearview road, eden, north carolina'
+    alphanum  : S1='165 clearview road eden nc'  !=  TGT='279 clearview road eden north carolina'
+    sorted    : S1='165 clearview eden nc road'  !=  TGT='279 carolina clearview eden north road'
+    expanded  : S1='165 clearview road eden north carolina'  !=  TGT='279 clearview road eden north carolina'
+
+--- Pair 13: S1-528651403  <->  S3-7289261 ---
+  [business_name]
+    RAW S1 : Aloysia Damico Generation Inc
+    RAW TGT: Aloysia Generation Damico Inc
+    lower     : S1='aloysia damico generation inc'  !=  TGT='aloysia generation damico inc'
+    alphanum  : S1='aloysia damico generation inc'  !=  TGT='aloysia generation damico inc'
+    sorted    : S1='aloysia damico generation inc'  ==  TGT='aloysia damico generation inc'
+    expanded  : S1='aloysia damico generation incorporated'  !=  TGT='aloysia generation damico incorporated'
+  [business_address]
+    RAW S1 : 2337 Pendragon Road, Kingsport, TN
+    RAW TGT: ##2337 Pendragon Rd, Kingsport, Tennessee
+    lower     : S1='2337 pendragon road, kingsport, tn'  !=  TGT='##2337 pendragon rd, kingsport, tennessee'
+    alphanum  : S1='2337 pendragon road kingsport tn'  !=  TGT='2337 pendragon rd kingsport tennessee'
+    sorted    : S1='2337 kingsport pendragon road tn'  !=  TGT='2337 kingsport pendragon rd tennessee'
+    expanded  : S1='2337 pendragon road kingsport tennessee'  ==  TGT='2337 pendragon road kingsport tennessee'
+
+--- Pair 14: S1-815044399  <->  S3-294159911 ---
+  [business_name]
+    RAW S1 : Henderson Federal Sciences Inc
+    RAW TGT: Henderson Féderal
+    lower     : S1='henderson federal sciences inc'  !=  TGT='henderson federal'
+    alphanum  : S1='henderson federal sciences inc'  !=  TGT='henderson federal'
+    sorted    : S1='federal henderson inc sciences'  !=  TGT='federal henderson'
+    expanded  : S1='henderson federal sciences incorporated'  !=  TGT='henderson federal'
+  [business_address]
+    RAW S1 : 1522 E 7th Road, Lostant, IL
+    RAW TGT: 1522 East 7nd Rd, Lostant, Illinois
+    lower     : S1='1522 e 7th road, lostant, il'  !=  TGT='1522 east 7nd rd, lostant, illinois'
+    alphanum  : S1='1522 e 7th road lostant il'  !=  TGT='1522 east 7nd rd lostant illinois'
+    sorted    : S1='1522 7th e il lostant road'  !=  TGT='1522 7nd east illinois lostant rd'
+    expanded  : S1='1522 e 7th road lostant illinois'  !=  TGT='1522 east 7nd road lostant illinois'
+
+--- Pair 15: S1-715861166  <->  S2-705665414 ---
+  [business_name]
+    RAW S1 : FF Realcon LLP
+    RAW TGT: FF REALCON LLP
+    lower     : S1='ff realcon llp'  ==  TGT='ff realcon llp'
+    alphanum  : S1='ff realcon llp'  ==  TGT='ff realcon llp'
+    sorted    : S1='ff llp realcon'  ==  TGT='ff llp realcon'
+    expanded  : S1='ff realcon llp'  ==  TGT='ff realcon llp'
+  [business_address]
+    RAW S1 : C 06 Apmc Market I Phase Ii Sector 19, Turbhe Vashi, Thane, Maharashtra
+    RAW TGT: महाराष्ट्र, C ##06 APMC MARKET I PHASE II SECTOR 19, TURBHE VASHI, THANE
+    lower     : S1='c 06 apmc market i phase ii sector 19, turbhe vashi, thane, maharashtra'  !=  TGT='महाराषटर, c ##06 apmc market i phase ii sector 19, turbhe vashi, thane'
+    alphanum  : S1='c 06 apmc market i phase ii sector 19 turbhe vashi thane maharashtra'  !=  TGT='c 06 apmc market i phase ii sector 19 turbhe vashi thane'
+    sorted    : S1='06 19 apmc c i ii maharashtra market phase sector thane turbhe vashi'  !=  TGT='06 19 apmc c i ii market phase sector thane turbhe vashi'
+    expanded  : S1='c 06 apmc market i phase ii sector 19 turbhe vashi thane maharashtra'  !=  TGT='c 06 apmc market i phase ii sector 19 turbhe vashi thane'
+
+--- Pair 16: S1-322698341  <->  S3-430209411 ---
+  [business_name]
+    RAW S1 : My Blue Exports Pvt Ltd
+    RAW TGT: My Blue Pvt Pvt Ltd Services
+    lower     : S1='my blue exports pvt ltd'  !=  TGT='my blue pvt pvt ltd services'
+    alphanum  : S1='my blue exports pvt ltd'  !=  TGT='my blue pvt pvt ltd services'
+    sorted    : S1='blue exports ltd my pvt'  !=  TGT='blue ltd my pvt pvt services'
+    expanded  : S1='my blue exports private limited'  !=  TGT='my blue private private limited services'
+  [business_address]
+    RAW S1 : At Post Tanahali Tal Indi, Bijapur, Karnataka
+    RAW TGT: Bijapur, ಕರ್ನಾಟಕ, Bijapur, At Post Tanahali Tal Indi
+    lower     : S1='at post tanahali tal indi, bijapur, karnataka'  !=  TGT='bijapur, ಕರನಾಟಕ, bijapur, at post tanahali tal indi'
+    alphanum  : S1='at post tanahali tal indi bijapur karnataka'  !=  TGT='bijapur bijapur at post tanahali tal indi'
+    sorted    : S1='at bijapur indi karnataka post tal tanahali'  !=  TGT='at bijapur bijapur indi post tal tanahali'
+    expanded  : S1='at post tanahali tal indi bijapur karnataka'  !=  TGT='bijapur bijapur at post tanahali tal indi'
+
+--- Pair 17: S1-204545711  <->  S2-347900826 ---
+  [business_name]
+    RAW S1 : Chiropractic Care Associates of Pittsfield
+    RAW TGT: CHIROPRACTIC CARE ASSOCIATES OF PITTSFIELD LP
+    lower     : S1='chiropractic care associates of pittsfield'  !=  TGT='chiropractic care associates of pittsfield lp'
+    alphanum  : S1='chiropractic care associates of pittsfield'  !=  TGT='chiropractic care associates of pittsfield lp'
+    sorted    : S1='associates care chiropractic of pittsfield'  !=  TGT='associates care chiropractic lp of pittsfield'
+    expanded  : S1='chiropractic care associates of pittsfield'  !=  TGT='chiropractic care associates of pittsfield lp'
+  [business_address]
+    RAW S1 : 50 Bartlett Avenue, Unit 2, Pittsfield, MA
+    RAW TGT: 50. BARTLETT AVE, PITTSFIELD, MA
+    lower     : S1='50 bartlett avenue, unit 2, pittsfield, ma'  !=  TGT='50. bartlett ave, pittsfield, ma'
+    alphanum  : S1='50 bartlett avenue unit 2 pittsfield ma'  !=  TGT='50 bartlett ave pittsfield ma'
+    sorted    : S1='2 50 avenue bartlett ma pittsfield unit'  !=  TGT='50 ave bartlett ma pittsfield'
+    expanded  : S1='50 bartlett avenue unit 2 pittsfield ma'  !=  TGT='50 bartlett avenue pittsfield ma'
+
+--- Pair 18: S1-305970695  <->  S3-582801494 ---
+  [business_name]
+    RAW S1 : Straight Edge Book Store P.C.
+    RAW TGT: Straight Edge Book Store
+    lower     : S1='straight edge book store p.c.'  !=  TGT='straight edge book store'
+    alphanum  : S1='straight edge book store p c'  !=  TGT='straight edge book store'
+    sorted    : S1='book c edge p store straight'  !=  TGT='book edge store straight'
+    expanded  : S1='straight edge book store pc'  !=  TGT='straight edge book store'
+  [business_address]
+    RAW S1 : 3035 River Birch Drive, Unit Unit A, City Of Brookfield, WI
+    RAW TGT: 3035 River Birch Drive, Unit Unit A, Brookfield, Wisconsin
+    lower     : S1='3035 river birch drive, unit unit a, city of brookfield, wi'  !=  TGT='3035 river birch drive, unit unit a, brookfield, wisconsin'
+    alphanum  : S1='3035 river birch drive unit unit a city of brookfield wi'  !=  TGT='3035 river birch drive unit unit a brookfield wisconsin'
+    sorted    : S1='3035 a birch brookfield city drive of river unit unit wi'  !=  TGT='3035 a birch brookfield drive river unit unit wisconsin'
+    expanded  : S1='3035 river birch drive unit unit a city of brookfield wi'  !=  TGT='3035 river birch drive unit unit a brookfield wisconsin'
+
+--- Pair 19: S1-742019967  <->  S2-48286361 ---
+  [business_name]
+    RAW S1 : Encore Cabs Pvt Ltd
+    RAW TGT: Sri ENCORE CABS PVT LTD.
+    lower     : S1='encore cabs pvt ltd'  !=  TGT='encore cabs pvt ltd.'
+    alphanum  : S1='encore cabs pvt ltd'  ==  TGT='encore cabs pvt ltd'
+    sorted    : S1='cabs encore ltd pvt'  ==  TGT='cabs encore ltd pvt'
+    expanded  : S1='encore cabs private limited'  ==  TGT='encore cabs private limited'
+  [business_address]
+    RAW S1 : S-1 Unit, Second Floor, Anr Centre No. 137, Road No.1, Banjara Hills, Hyderabad, Telangana
+    RAW TGT: S-#1 UNIT, SECOND FLOOR, ANR CENTRE NO. 137, ROAD NO.1, BANJARA HILLS, Telangana
+    lower     : S1='s-1 unit, second floor, anr centre no. 137, road no.1, banjara hills, hyderabad, telangana'  !=  TGT='s-#1 unit, second floor, anr centre no. 137, road no.1, banjara hills, telangana'
+    alphanum  : S1='s 1 unit second floor anr centre no 137 road no 1 banjara hills hyderabad telangana'  !=  TGT='s 1 unit second floor anr centre no 137 road no 1 banjara hills telangana'
+    sorted    : S1='1 1 137 anr banjara centre floor hills hyderabad no no road s second telangana unit'  !=  TGT='1 1 137 anr banjara centre floor hills no no road s second telangana unit'
+    expanded  : S1='s 1 unit second floor anr centre no 137 road no 1 banjara hills hyderabad telangana'  !=  TGT='s 1 unit second floor anr centre no 137 road no 1 banjara hills telangana'
+
+--- Pair 20: S1-433108657  <->  S2-677618114 ---
+  [business_name]
+    RAW S1 : Royal Consultancy Private Limited
+    RAW TGT: Smt ROYAL CONSULTANCY  PRIVATE LIMITED
+    lower     : S1='royal consultancy private limited'  ==  TGT='royal consultancy private limited'
+    alphanum  : S1='royal consultancy private limited'  ==  TGT='royal consultancy private limited'
+    sorted    : S1='consultancy limited private royal'  ==  TGT='consultancy limited private royal'
+    expanded  : S1='royal consultancy private limited'  ==  TGT='royal consultancy private limited'
+  [business_address]
+    RAW S1 : Mumbai City, C/O City Light Cinema, Ashford Chambers, Lady Jamshedji Road, Mahim, Mumbai, Maharashtra
+    RAW TGT: C/O CITY LIGHT CINEMA, ASHFORD CHAMBERS, LAY JAMSHEDJI ROAD, MAHIM, MUMBAI, Maharashtra
+    lower     : S1='mumbai city, c/o city light cinema, ashford chambers, lady jamshedji road, mahim, mumbai, maharashtra'  !=  TGT='city light cinema, ashford chambers, lay jamshedji road, mahim, mumbai, maharashtra'
+    alphanum  : S1='mumbai city c o city light cinema ashford chambers lady jamshedji road mahim mumbai maharashtra'  !=  TGT='city light cinema ashford chambers lay jamshedji road mahim mumbai maharashtra'
+    sorted    : S1='ashford c chambers cinema city city jamshedji lady light maharashtra mahim mumbai mumbai o road'  !=  TGT='ashford chambers cinema city jamshedji lay light maharashtra mahim mumbai road'
+    expanded  : S1='mumbai city c o city light cinema ashford chambers lady jamshedji road mahim mumbai maharashtra'  !=  TGT='city light cinema ashford chambers lay jamshedji road mahim mumbai maharashtra'
+
+--- Pair 21: S1-511316240  <->  S2-164427228 ---
+  [business_name]
+    RAW S1 : Margolies Apex Hovnanian Inc
+    RAW TGT: -- Margolies  Apex Hovnanian Inc
+    lower     : S1='margolies apex hovnanian inc'  ==  TGT='margolies apex hovnanian inc'
+    alphanum  : S1='margolies apex hovnanian inc'  ==  TGT='margolies apex hovnanian inc'
+    sorted    : S1='apex hovnanian inc margolies'  ==  TGT='apex hovnanian inc margolies'
+    expanded  : S1='margolies apex hovnanian incorporated'  ==  TGT='margolies apex hovnanian incorporated'
+  [business_address]
+    RAW S1 : 182 Sherwood Road, Newport, NC
+    RAW TGT: 182-184 SHERWOOD RD, NEWPORT, NC
+    lower     : S1='182 sherwood road, newport, nc'  !=  TGT='182-184 sherwood rd, newport, nc'
+    alphanum  : S1='182 sherwood road newport nc'  !=  TGT='182 184 sherwood rd newport nc'
+    sorted    : S1='182 nc newport road sherwood'  !=  TGT='182 184 nc newport rd sherwood'
+    expanded  : S1='182 sherwood road newport north carolina'  !=  TGT='182 184 sherwood road newport north carolina'
+
+--- Pair 22: S1-830748063  <->  S2-104060035 ---
+  [business_name]
+    RAW S1 : Everage and Rice LLC
+    RAW TGT: Everage and Rice L.L.C.
+    lower     : S1='everage and rice llc'  !=  TGT='everage and rice l.l.c.'
+    alphanum  : S1='everage and rice llc'  !=  TGT='everage and rice l l c'
+    sorted    : S1='and everage llc rice'  !=  TGT='and c everage l l rice'
+    expanded  : S1='everage and rice llc'  ==  TGT='everage and rice llc'
+  [business_address]
+    RAW S1 : 12700 Constitution Avenue, Albuquerque, NM
+    RAW TGT: 
+    lower     : S1='12700 constitution avenue, albuquerque, nm'  !=  TGT=''
+    alphanum  : S1='12700 constitution avenue albuquerque nm'  !=  TGT=''
+    sorted    : S1='12700 albuquerque avenue constitution nm'  !=  TGT=''
+    expanded  : S1='12700 constitution avenue albuquerque new mexico'  !=  TGT=''
+
+--- Pair 23: S1-188088618  <->  S2-436753046 ---
+  [business_name]
+    RAW S1 : Wallace, Zhang & Concepcion Co
+    RAW TGT: WALLACE, ZHANG & CONCEPCION
+    lower     : S1='wallace, zhang & concepcion co'  !=  TGT='wallace, zhang & concepcion'
+    alphanum  : S1='wallace zhang concepcion co'  !=  TGT='wallace zhang concepcion'
+    sorted    : S1='co concepcion wallace zhang'  !=  TGT='concepcion wallace zhang'
+    expanded  : S1='wallace zhang concepcion co'  !=  TGT='wallace zhang concepcion'
+  [business_address]
+    RAW S1 : NC, Youngsville, 5933 Jack Jones Road
+    RAW TGT: 5933 JACK JONES ROAD, NC, YOUNGSVILLE
+    lower     : S1='nc, youngsville, 5933 jack jones road'  !=  TGT='5933 jack jones road, nc, youngsville'
+    alphanum  : S1='nc youngsville 5933 jack jones road'  !=  TGT='5933 jack jones road nc youngsville'
+    sorted    : S1='5933 jack jones nc road youngsville'  ==  TGT='5933 jack jones nc road youngsville'
+    expanded  : S1='north carolina youngsville 5933 jack jones road'  !=  TGT='5933 jack jones road north carolina youngsville'
+
+--- Pair 24: S1-943181166  <->  S3-182732453 ---
+  [business_name]
+    RAW S1 : Red Hair Studio
+    RAW TGT: Red Hair Studio Center
+    lower     : S1='red hair studio'  !=  TGT='red hair studio center'
+    alphanum  : S1='red hair studio'  !=  TGT='red hair studio center'
+    sorted    : S1='hair red studio'  !=  TGT='center hair red studio'
+    expanded  : S1='red hair studio'  !=  TGT='red hair studio center'
+  [business_address]
+    RAW S1 : 6855 Nyberg Street, Unit #J-101, Tualatin, OR
+    RAW TGT: 6855 Nyberg St, # #J-101, Tualatin, Oregon
+    lower     : S1='6855 nyberg street, unit #j-101, tualatin, or'  !=  TGT='6855 nyberg st, # #j-101, tualatin, oregon'
+    alphanum  : S1='6855 nyberg street unit j 101 tualatin or'  !=  TGT='6855 nyberg st j 101 tualatin oregon'
+    sorted    : S1='101 6855 j nyberg or street tualatin unit'  !=  TGT='101 6855 j nyberg oregon st tualatin'
+    expanded  : S1='6855 nyberg street unit j 101 tualatin oregon'  !=  TGT='6855 nyberg street j 101 tualatin oregon'
+
+--- Pair 25: S1-931194776  <->  S3-556020575 ---
+  [business_name]
+    RAW S1 : Wainscott Petroleum Inc.
+    RAW TGT: Inc. Wainscott Petroleum
+    lower     : S1='wainscott petroleum inc.'  !=  TGT='inc. wainscott petroleum'
+    alphanum  : S1='wainscott petroleum inc'  !=  TGT='inc wainscott petroleum'
+    sorted    : S1='inc petroleum wainscott'  ==  TGT='inc petroleum wainscott'
+    expanded  : S1='wainscott petroleum incorporated'  !=  TGT='incorporated wainscott petroleum'
+  [business_address]
+    RAW S1 : 453 Kindra Court, Cottonwood, AZ
+    RAW TGT: 453 Kindra Court, <NULL>, Cottonwood, Arizona
+    lower     : S1='453 kindra court, cottonwood, az'  !=  TGT='453 kindra court, , cottonwood, arizona'
+    alphanum  : S1='453 kindra court cottonwood az'  !=  TGT='453 kindra court cottonwood arizona'
+    sorted    : S1='453 az cottonwood court kindra'  !=  TGT='453 arizona cottonwood court kindra'
+    expanded  : S1='453 kindra court cottonwood arizona'  ==  TGT='453 kindra court cottonwood arizona'
+
+================================================================================
+END OF SPOT-CHECK -- Review '==' rows; near-identical sorted/expanded = PASS
+================================================================================
