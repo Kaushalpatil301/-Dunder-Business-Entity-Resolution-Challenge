@@ -1,15 +1,10 @@
-# Pinned dependencies — exact environment for reproducing the solution
-
-# Core data stack
-pandas==2.2.2
-numpy==1.26.4
-
-# ML
-scikit-learn==1.5.0
-lightgbm==4.3.0
-
-# String similarity (C++ speed — critical for Phase 5)
-rapidfuzz==3.9.3
-
-# Config
-pyyaml==6.0.1
+pandas>=2.0.0
+numpy>=1.26.0
+scikit-learn>=1.5.0
+lightgbm>=4.3.0
+rapidfuzz>=3.9.0
+duckdb>=1.0.0
+pyyaml>=6.0.0
+sparse-dot-topn>=1.1.0
+scipy>=1.10.0
+pyarrow>=14.0.0

@@ -2,6 +2,15 @@
 dataset/
 output/
 context/
+artifacts/
+scratch/
+.tmp/
+*.parquet
+*.tsv
+*.zip
+*.db
+*.wal
+*.pkl
 
 # macOS
 .DS_Store

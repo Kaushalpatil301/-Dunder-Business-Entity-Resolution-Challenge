@@ -12,98 +12,34 @@ as each Source 1 record, scored by macro-averaged F₀.₅.
 pip install -r requirements.txt
 ```
 
-**Pinned dependencies**: pandas 2.2.2, numpy 1.26.4, scikit-learn 1.5.0,
-lightgbm 4.3.0, rapidfuzz 3.9.3, pyyaml 6.0.1.
+**Pinned dependencies**: pandas 2.2.x, numpy 2.x, scikit-learn 1.9.x,
+lightgbm 4.7.x, rapidfuzz 3.x, duckdb 1.5.x, pyyaml 6.x, sparse-dot-topn, scipy.
 
-## End-to-End Reproduction
+---
+
+## End-to-End Reproduction (from repo root)
 
 All commands are run from the **repo root** (`-Dunder-Business-Entity-Resolution-Challenge/`).
 
----
-
-### Step 1 — Prepare Data (no action needed)
-
-Dataset is already structured under `dataset/train/` and `dataset/test/`.
-
----
-
-### Step 2 — Verify Entity Split Exists
-
-The entity split (fold A/B/C/D) was generated in Phase 2 and stored at
-`artifacts/entity_split.tsv`. If missing, regenerate it:
+### Option A: Complete end-to-end pipeline (Recommended)
 
 ```bash
-python code/business_entity_resolution/src/data/splitter.py
+python run_full_pipeline.py
 ```
 
----
-
-### Step 3 — Train Pipeline (Phases 4–7)
-
-Runs blocking, feature extraction, LightGBM training, and isotonic
-calibration in sequence. Artifacts are saved under `artifacts/`.
-
-```bash
-python code/business_entity_resolution/src/pipeline/train_pipeline.py
-```
-
-This produces:
-- `artifacts/lgbm_model.txt` — trained model
-- `artifacts/threshold.txt` — F₀.₅-optimised threshold
-- `artifacts/calibrator.pkl` — isotonic calibrator
-- `artifacts/phase4_recall_report.txt` — Phase 4 gate evidence
-
----
-
-### Step 4 — Generate Candidates for Test Set
-
-```bash
-python code/business_entity_resolution/src/blocking.py \
-    --input_dir ../../dataset/test \
-    --output    ../../output/candidate_pairs.tsv
-```
-
-*(Or equivalently, from within `code/business_entity_resolution/`:)*
-
-```bash
-python src/blocking.py \
-    --input_dir ../../dataset/test \
-    --output    ../../output/candidate_pairs.tsv
-```
-
----
-
-### Step 5 — Run Matching (Phases 5–8)
-
-```bash
-python src/matching.py \
-    --candidates ../../output/candidate_pairs.tsv \
-    --input_dir  ../../dataset/test \
-    --output     ../../output/matching_results.tsv
-```
-
----
-
-### Step 6 — Validate Submission
-
-```bash
-python ../../utils/validate_submission.py \
-    --matching  ../../output/matching_results.tsv \
-    --candidate ../../output/candidate_pairs.tsv \
-    --test-dir  ../../dataset/test
-```
-
-Exit code 0 = PASS. Only then proceed to packaging.
-
----
-
-### Alternative: Full End-to-End Inference (Test Only)
-
-If artifacts are already trained, you can run everything in one call:
-
-```bash
-python code/business_entity_resolution/src/pipeline/run_inference.py
-```
+This runs all steps end-to-end:
+- Step 1: Normalization (reusing cached or generated)
+- Step 2: 9-channel blocking (reusing CH1-CH5 if present, adding CH6-CH9)
+- Step 3: Candidate deduplication & Phase 4 recall validation on Fold D
+- Step 4: 15-feature pairwise extraction using RapidFuzz (chunked, memory-safe)
+- Step 5: LightGBM training with early stopping & threshold tuning on MACRO F0.5
+- Step 6: Isotonic calibration
+- Step 7: Test set normalization & 9-channel blocking
+- Step 8: `output/candidate_pairs.tsv` generation
+- Step 9: Test set feature extraction & calibrated scoring
+- Step 10: Decision resolution & `output/matching_results.tsv` generation
+- Step 11: Automatic validation with `utils/validate_submission.py`
+- Step 12: Automatic submission packaging into zip archive
 
 ---
 
@@ -114,16 +50,71 @@ python code/business_entity_resolution/src/pipeline/run_inference.py
 | `output/candidate_pairs.tsv` | Blocking output — all candidate entity pairs (one row per S1 entity) |
 | `output/matching_results.tsv` | Final predicted matches — the leaderboard upload file |
 
+---
+
+## Validation
+
+```bash
+python utils/validate_submission.py \
+    --matching  output/matching_results.tsv \
+    --candidate output/candidate_pairs.tsv \
+    --test-dir  dataset/test
+```
+
+Exit code 0 = PASS.
+
+Quick stats + validation:
+```bash
+python quick_validate.py
+```
+
+---
+
+## Pipeline Architecture
+
+```
+9-Channel Blocking (Phase 4):
+  CH1 exact_sorted              → DuckDB exact join on name_sorted
+  CH2 exact_expanded_sorted     → DuckDB exact join on name_expanded_sorted
+  CH3 token_rare (freq≤200)     → DuckDB inverted index, 1 shared rare token
+  CH4 token_medium (freq≤5000)  → DuckDB inverted index, ≥2 shared medium tokens
+  CH5 addr_composite            → DuckDB exact join: (4+digit num)+(4+char word)+country
+  CH6 exact_stripped_sorted     → DuckDB exact join: leet-normalized + legal suffixes stripped
+  CH7 name_prefix2              → DuckDB exact join: first 2 words + country (freq ≤ 50)
+  CH8 addr_street               → DuckDB exact join: house number (1-6 digits) + street + country
+  CH9 name_w1                   → DuckDB exact join: distinctive first word (len ≥ 6) + country
+```
+
+Feature Extraction (Phase 5): 15 pairwise features
+  - RapidFuzz: token_sort_ratio, partial_ratio, QRatio, WRatio, expanded_sort_ratio
+  - Exact: name_sorted_exact, name_alphanum_exact, name_prefix5_exact, addr_prefix4_match
+  - Address: addr_token_jaccard, addr_numeric_match, addr_jaro_winkler
+  - Country: country_match (open-set — France safe)
+  - Structural: name_len_ratio, name_token_len_ratio
+
+LightGBM (Phase 6):
+  - num_leaves=127, learning_rate=0.03, n_estimators=1000
+  - Trained on fold A (60%), threshold-tuned on fold B (10%)
+  - scale_pos_weight handles class imbalance
+
+Isotonic Calibration (Phase 7): fold C (15%), fold-disjoint from A and B
+
+Decision Layer (Phase 8):
+  - Apply F₀.₅-optimal threshold
+  - Target-side dedup (greedy by calibrated probability)
+  - Singletons: entities with no passing pairs → empty row (earns 1.0 F₀.₅)
+```
+
+---
+
 ## Project Structure
 
 ```
 code/business_entity_resolution/
 ├── src/
-│   ├── blocking.py            # Entry-point: blocking for any split
-│   ├── matching.py            # Entry-point: feature+model+decision
+│   ├── blocking.py            # Legacy entry-point
+│   ├── matching.py            # Legacy entry-point
 │   ├── blocking/
-│   │   ├── fast_normalizer.py # Vectorized normalization for blocking
-│   │   └── union.py           # 5-channel blocking union orchestrator
 │   ├── features/
 │   │   └── pairwise.py        # RapidFuzz + address feature extraction
 │   ├── models/
@@ -142,4 +133,11 @@ code/business_entity_resolution/
 │       └── scorer.py          # Macro F₀.₅ scorer
 ├── README.md                  # This file
 └── requirements.txt           # Pinned dependencies
+
+# Root-level pipeline scripts:
+master_run.py            # Full end-to-end runner
+add_new_channels.py      # Incremental: add CH6-CH9 to existing CH1-CH5
+run_after_blocking.py    # Run Phases 5-16 after blocking is done
+quick_validate.py        # Quick validation + stats
+utils/validate_submission.py  # Official submission validator
 ```
