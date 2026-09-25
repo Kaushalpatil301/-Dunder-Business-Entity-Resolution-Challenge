@@ -1,0 +1,9 @@
+# Pinned dependencies — update versions as you finalize your solution
+
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.0
+# Add more as needed, e.g.:
+# torch==2.3.0
+# sentence-transformers==3.0.1
+# rapidfuzz==3.9.3
