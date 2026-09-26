@@ -1,0 +1,59 @@
+# config/pipeline.yaml
+# Single source of truth for all pipeline parameters.
+# No hardcoded values in src/ -- everything is loaded through config.py.
+
+# ---- Reproducibility ----
+random_seed: 42
+
+# ---- Paths (relative to repo root) ----
+paths:
+  train_dir:    dataset/train
+  test_dir:     dataset/test
+  artifacts_dir: artifacts
+  output_dir:   output
+
+# ---- Entity-level split (Phase 2) ----
+# Folds: A=train(60%), B=threshold-tune(10%), C=calibration(15%), D=val recall-gate(15%)
+split:
+  fold_sizes:          # must sum to 1.0
+    A: 0.60
+    B: 0.10
+    C: 0.15
+    D: 0.15
+  stratify_by: is_singleton   # preserve singleton ratio across folds
+  output_file: artifacts/entity_split.tsv
+
+# ---- Blocking (Phase 4) ----
+blocking:
+  min_key_len:       3
+  min_tok_len:       3
+  max_freq_rare:     150
+  max_freq_medium:   3000
+  min_shared_rare:   1
+  min_shared_medium: 2
+  chunk_s1:          200000
+  chunk_addr:        100000
+
+# ---- Feature extraction (Phase 5) ----
+features:
+  chunk_size: 200000
+
+# ---- LightGBM (Phase 6) ----
+lightgbm:
+  objective:         binary
+  boosting_type:     gbdt
+  num_leaves:        63
+  learning_rate:     0.05
+  n_estimators:      500
+  min_child_samples: 30
+  subsample:         0.8
+  colsample_bytree:  0.8
+  reg_alpha:         0.1
+  reg_lambda:        0.1
+  early_stopping:    30
+  verbose:           -1
+
+# ---- Decision layer (Phase 8) ----
+decision:
+  default_threshold: 0.5   # overridden by threshold.txt from tuning
+  score_column:      cal_prob

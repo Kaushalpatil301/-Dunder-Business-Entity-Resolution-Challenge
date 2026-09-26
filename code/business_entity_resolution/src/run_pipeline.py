@@ -1,0 +1,1300 @@
+#!/usr/bin/env python
+"""
+run_full_pipeline.py — Master High-Performance Entity Resolution Pipeline
+========================================================================
+
+Architecture:
+1. 9-Channel Blocking in DuckDB (reusing CH1-CH9 flat candidates if present):
+   - CH1: exact_sorted
+   - CH2: exact_expanded_sorted
+   - CH3: token_rare
+   - CH4: token_medium
+   - CH5: addr_composite
+   - CH6: exact_stripped_sorted (leetspeak normalized + legal suffixes removed)
+   - CH7: name_prefix2 (first 2 words + country, freq <= 50)
+   - CH8: addr_street (house number + street name + country, freq <= 50)
+   - CH9: name_w1 (first word + country, freq <= 40, len >= 6)
+2. Fast DuckDB + Rapidfuzz Feature Extraction (38,000+ pairs/sec, vectorized).
+3. LightGBM classifier with early stopping & optimal threshold tuning for MACRO F0.5.
+4. Isotonic probability calibration on Fold C.
+5. Test set multi-view normalization + 9-channel blocking.
+6. Zero-disk streaming scoring of test candidate pairs.
+7. Target-side greedy deduplication + singleton preservation.
+8. Output generation:
+   - output/candidate_pairs.tsv
+   - output/matching_results.tsv
+9. Automatic validation via utils/validate_submission.py.
+10. Automatic packaging via package_submission.py.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import gc
+import logging
+import os
+import pathlib
+import pickle
+import re
+import subprocess
+import sys
+import time
+
+def _find_repo_root() -> pathlib.Path:
+    p = pathlib.Path(__file__).resolve().parent
+    for _ in range(5):
+        if (p / "dataset").exists() or (p / "output").exists():
+            return p.resolve()
+        p = p.parent
+    return pathlib.Path(__file__).resolve().parents[2]
+
+REPO = _find_repo_root()
+SRC_DIR = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(SRC_DIR))
+sys.path.insert(0, str(REPO / "code" / "business_entity_resolution" / "src"))
+
+def _ensure(pkg, name=None):
+    import importlib.util
+    if importlib.util.find_spec(name or pkg) is None:
+        print(f"[setup] Installing {pkg} ...", flush=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q"], check=True)
+
+_ensure("pyyaml",    "yaml")
+_ensure("lightgbm",  "lightgbm")
+_ensure("rapidfuzz", "rapidfuzz")
+_ensure("duckdb",    "duckdb")
+_ensure("scipy",     "scipy")
+_ensure("pyarrow",   "pyarrow")
+
+import numpy as np
+import pandas as pd
+import duckdb
+import lightgbm as lgb
+from rapidfuzz import distance as rf_dist
+from rapidfuzz import fuzz as rf_fuzz
+from sklearn.isotonic import IsotonicRegression
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace", line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace", line_buffering=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("er_pipeline")
+
+def _find_arts() -> pathlib.Path:
+    here = pathlib.Path(__file__).resolve().parent
+    for candidate in [here / "artifacts", here.parent / "artifacts", REPO / "artifacts"]:
+        if (candidate / "lgbm_model.txt").exists():
+            return candidate.resolve()
+    cand = (REPO / "artifacts").resolve()
+    cand.mkdir(parents=True, exist_ok=True)
+    return cand
+
+def _find_dir(sub: str) -> pathlib.Path:
+    for candidate in [REPO / "dataset" / sub, REPO / sub, pathlib.Path.cwd() / "dataset" / sub]:
+        if candidate.exists():
+            return candidate.resolve()
+    return (REPO / "dataset" / sub).resolve()
+
+ARTS      = _find_arts()
+TRAIN_DIR = _find_dir("train")
+TEST_DIR  = _find_dir("test")
+OUT_DIR   = (REPO / "output").resolve()
+ARTS.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+TMP_TRAIN = ARTS / "_tmp_channels"
+TMP_TRAIN.mkdir(parents=True, exist_ok=True)
+
+SEED = 42
+
+FEAT_COLS = [
+    "name_token_sort_ratio",
+    "name_partial_ratio",
+    "name_expanded_sort_ratio",
+    "name_qratio",
+    "name_jaro_winkler",
+    "name_sorted_exact",
+    "name_alphanum_exact",
+    "addr_token_jaccard",
+    "addr_numeric_match",
+    "addr_jaro_winkler",
+    "addr_prefix4_match",
+    "country_match",
+    "name_len_ratio",
+    "name_token_len_ratio",
+    "name_prefix5_exact",
+]
+
+_LEGAL_REGEX = r'\b(llc|pllc|inc|incorporated|ltd|limited|corp|corporation|pvt|private|co|company|services|service|associates|group|holdings|enterprises)\b'
+_LEET_TRANS = str.maketrans('0134578@$', 'oleastbas')
+
+_ABBR_MAP = {
+    "private": "pvt",   "pvt": "private",
+    "limited": "ltd",   "ltd": "limited",
+    "incorporated": "inc", "inc": "incorporated",
+    "corporation": "corp", "corp": "corporation",
+    "services": "svcs", "svcs": "services",
+    "service": "svc",   "svc": "service",
+    "management": "mgmt", "mgmt": "management",
+    "international": "intl", "intl": "international",
+    "associates": "assoc", "assoc": "associates",
+    "and": "&",         "&": "and",
+    "road": "rd",       "rd": "road",
+    "street": "st",     "st": "street",
+    "avenue": "ave",    "ave": "avenue",
+}
+
+
+# =============================================================================
+# NORMALIZATION
+# =============================================================================
+
+def normalize_sources(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize business name, address, and extract blocking keys."""
+    t0 = time.time()
+    log.info("  Normalizing %d records ...", len(df))
+
+    # Base name
+    name_col = "business_name" if "business_name" in df.columns else ("name" if "name" in df.columns else None)
+    name = (df[name_col] if name_col else pd.Series("", index=df.index)).fillna("").astype(str).str.lower().str.strip()
+    name = name.str.replace(r"<null>", "", regex=True)
+    name = name.str.replace(r"^(smt|sri|--|[*]+)\s+", "", regex=True)
+    name = name.str.replace(r"[^\w\s&]", " ", regex=True)
+    name = name.str.replace(r"\s+", " ", regex=True).str.strip()
+
+    alnum = name.str.replace(r"[^a-z0-9 ]", " ", regex=True)
+    alnum = alnum.str.replace(r"\s+", " ", regex=True).str.strip()
+
+    sorted_view = alnum.str.split().apply(lambda t: " ".join(sorted(t)) if t else "")
+
+    # Expanded name
+    exp = alnum.copy()
+    for src, tgt in _ABBR_MAP.items():
+        exp = exp.str.replace(rf"\b{src}\b", tgt, regex=True)
+    exp = exp.str.replace(r"\s+", " ", regex=True).str.strip()
+    exp_sorted = exp.str.split().apply(lambda t: " ".join(sorted(t)) if t else "")
+
+    # Clean stripped name (leetspeak replaced + legal designators removed)
+    cname = alnum.str.translate(_LEET_TRANS)
+    cname = cname.str.replace(_LEGAL_REGEX, " ", regex=True)
+    cname = cname.str.replace(r"\s+", " ", regex=True).str.strip()
+    csorted = cname.str.split().apply(lambda t: " ".join(sorted(t)) if t else "")
+
+    # Prefix 2 words
+    cpref2 = csorted.str.split().apply(lambda t: " ".join(t[:2]) if len(t) >= 2 else (t[0] if t else ""))
+
+    # First word
+    cw1 = csorted.str.split().apply(lambda t: t[0] if t else "")
+
+    # Address
+    addr_col = "business_address" if "business_address" in df.columns else ("address" if "address" in df.columns else None)
+    addr = (df[addr_col] if addr_col else pd.Series("", index=df.index)).fillna("").astype(str).str.lower().str.strip()
+    addr = addr.str.replace(r"<null>", "", regex=True)
+    addr_alnum = addr.str.replace(r"[^a-z0-9 ]", " ", regex=True)
+    addr_alnum = addr_alnum.str.replace(r"\s+", " ", regex=True).str.strip()
+
+    addr_num = addr_alnum.str.extract(r"(\d+)", expand=False).fillna("")
+    addr_prefix4 = addr_alnum.str[:4]
+
+    # Composite address key (postal/number + first token + country)
+    w1_addr = addr_alnum.str.split().apply(lambda t: t[0] if t else "")
+    addr_comp = (addr_num + "_" + w1_addr + "_" + df["country"].fillna("").astype(str)).str.strip("_")
+
+    # Address street key: any digit house number (1-6 digits) + street word (3+ chars)
+    ex_street = addr_alnum.str.extract(r"(\d+)\s+([a-z0-9]{3,})", expand=True)
+    addr_street = (ex_street[0].fillna("") + " " + ex_street[1].fillna("")).str.strip()
+
+    out = pd.DataFrame(index=df.index)
+    out["entity_id"]            = df["entity_id"].astype(str)
+    out["country"]              = df["country"].fillna("").astype(str)
+    out["name_alphanum"]        = alnum
+    out["name_sorted"]          = sorted_view
+    out["name_expanded"]        = exp
+    out["name_expanded_sorted"] = exp_sorted
+    out["name_prefix5"]         = sorted_view.str[:5]
+    out["csort"]                = csorted
+    out["cpref2"]               = cpref2
+    out["cw1"]                  = cw1
+    out["addr_alphanum"]        = addr_alnum
+    out["addr_numeric"]         = addr_num
+    out["addr_prefix4"]         = addr_prefix4
+    out["addr_composite"]       = addr_comp
+    out["addr_street"]          = addr_street
+
+    log.info("  Normalized in %.1f min.", (time.time() - t0) / 60)
+    return out
+
+
+# =============================================================================
+# BLOCKING CHANNELS
+# =============================================================================
+
+def build_blocking_channels(s1n: pd.DataFrame, s2s3n: pd.DataFrame, tmp: pathlib.Path) -> list[pathlib.Path]:
+    """Generate 9 blocking channels using DuckDB."""
+    log.info("=== Running 9-Channel Blocking ===")
+    t0 = time.time()
+    tmp.mkdir(parents=True, exist_ok=True)
+    n_cpu = os.cpu_count() or 4
+    ch_files = []
+
+    db_path = str(tmp / "_ddb_exact.db")
+    for f in [db_path, db_path + ".wal"]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except: pass
+
+    con = duckdb.connect(database=db_path)
+    con.execute("SET memory_limit='12GB'")
+    con.execute(f"SET threads={max(4, n_cpu // 2)}")
+    con.execute("SET preserve_insertion_order=false")
+    con.register("s1n", s1n)
+    con.register("s2s3n", s2s3n)
+
+    # 1. CH1: exact_sorted
+    p1 = tmp / "ch1.tsv"
+    if not p1.exists() or p1.stat().st_size < 100:
+        log.info("  Generating CH1: exact_sorted ...")
+        fwd1 = str(p1).replace("\\", "/")
+        con.execute(f"""
+            COPY (
+                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'exact_sorted' AS channel
+                FROM s1n a JOIN s2s3n b ON a.name_sorted = b.name_sorted AND a.country = b.country
+                WHERE length(a.name_sorted) >= 3 AND a.entity_id <> b.entity_id
+            ) TO '{fwd1}' (DELIMITER '\t', HEADER true)
+        """)
+    ch_files.append(p1)
+
+    # 2. CH2: exact_expanded_sorted
+    p2 = tmp / "ch2.tsv"
+    if not p2.exists() or p2.stat().st_size < 100:
+        log.info("  Generating CH2: exact_expanded_sorted ...")
+        fwd2 = str(p2).replace("\\", "/")
+        con.execute(f"""
+            COPY (
+                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'exact_expanded_sorted' AS channel
+                FROM s1n a JOIN s2s3n b ON a.name_expanded_sorted = b.name_expanded_sorted AND a.country = b.country
+                WHERE length(a.name_expanded_sorted) >= 3 AND a.entity_id <> b.entity_id
+            ) TO '{fwd2}' (DELIMITER '\t', HEADER true)
+        """)
+    ch_files.append(p2)
+
+    # 5. CH5: addr_composite
+    p5 = tmp / "ch5.tsv"
+    if not p5.exists() or p5.stat().st_size < 100:
+        log.info("  Generating CH5: addr_composite ...")
+        fwd5 = str(p5).replace("\\", "/")
+        con.execute(f"""
+            CREATE TEMP TABLE s2s3_comp_freq AS
+            SELECT addr_composite, COUNT(*) as cnt FROM s2s3n WHERE length(addr_composite) >= 8 GROUP BY addr_composite HAVING COUNT(*) <= 50;
+
+            COPY (
+                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'addr_composite' AS channel
+                FROM s1n a 
+                JOIN s2s3n b ON a.addr_composite = b.addr_composite AND a.country = b.country
+                JOIN s2s3_comp_freq f ON a.addr_composite = f.addr_composite
+                WHERE length(a.addr_composite) >= 8 AND a.entity_id <> b.entity_id
+            ) TO '{fwd5}' (DELIMITER '\t', HEADER true);
+
+            DROP TABLE s2s3_comp_freq;
+        """)
+    ch_files.append(p5)
+
+    # 6. CH6: exact_stripped_sorted
+    p6 = tmp / "ch6.tsv"
+    if not p6.exists() or p6.stat().st_size < 100:
+        log.info("  Generating CH6: exact_stripped_sorted ...")
+        fwd6 = str(p6).replace("\\", "/")
+        con.execute(f"""
+            CREATE TEMP TABLE s2s3_csort_freq AS
+            SELECT csort, COUNT(*) as cnt FROM s2s3n WHERE length(csort) >= 4 GROUP BY csort HAVING COUNT(*) <= 100;
+
+            COPY (
+                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'exact_stripped_sorted' AS channel
+                FROM s1n a 
+                JOIN s2s3n b ON a.csort = b.csort AND a.country = b.country
+                JOIN s2s3_csort_freq f ON a.csort = f.csort
+                WHERE length(a.csort) >= 4 AND a.entity_id <> b.entity_id
+            ) TO '{fwd6}' (DELIMITER '\t', HEADER true);
+
+            DROP TABLE s2s3_csort_freq;
+        """)
+    ch_files.append(p6)
+
+    # 7. CH7: name_prefix2
+    p7 = tmp / "ch7.tsv"
+    if not p7.exists() or p7.stat().st_size < 100:
+        log.info("  Generating CH7: name_prefix2 ...")
+        fwd7 = str(p7).replace("\\", "/")
+        con.execute(f"""
+            CREATE TEMP TABLE s2s3_p2_freq AS
+            SELECT cpref2, COUNT(*) as cnt FROM s2s3n WHERE length(cpref2) >= 8 GROUP BY cpref2 HAVING COUNT(*) <= 50;
+
+            COPY (
+                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'name_prefix2' AS channel
+                FROM s1n a 
+                JOIN s2s3n b ON a.cpref2 = b.cpref2 AND a.country = b.country
+                JOIN s2s3_p2_freq f ON a.cpref2 = f.cpref2
+                WHERE length(a.cpref2) >= 8 AND a.entity_id <> b.entity_id
+            ) TO '{fwd7}' (DELIMITER '\t', HEADER true);
+
+            DROP TABLE s2s3_p2_freq;
+        """)
+    ch_files.append(p7)
+
+    # 8. CH8: addr_street
+    p8 = tmp / "ch8.tsv"
+    if not p8.exists() or p8.stat().st_size < 100:
+        log.info("  Generating CH8: addr_street ...")
+        fwd8 = str(p8).replace("\\", "/")
+        con.execute(f"""
+            CREATE TEMP TABLE s2s3_addr_freq AS
+            SELECT addr_street, COUNT(*) as cnt FROM s2s3n WHERE length(addr_street) >= 6 GROUP BY addr_street HAVING COUNT(*) <= 50;
+
+            COPY (
+                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'addr_street' AS channel
+                FROM s1n a 
+                JOIN s2s3n b ON a.addr_street = b.addr_street AND a.country = b.country
+                JOIN s2s3_addr_freq f ON a.addr_street = f.addr_street
+                WHERE length(a.addr_street) >= 6 AND a.entity_id <> b.entity_id
+            ) TO '{fwd8}' (DELIMITER '\t', HEADER true);
+
+            DROP TABLE s2s3_addr_freq;
+        """)
+    ch_files.append(p8)
+
+    # 9. CH9: name_w1
+    p9 = tmp / "ch9.tsv"
+    if not p9.exists() or p9.stat().st_size < 100:
+        log.info("  Generating CH9: name_w1 ...")
+        fwd9 = str(p9).replace("\\", "/")
+        con.execute(f"""
+            CREATE TEMP TABLE s2s3_w1_freq AS
+            SELECT cw1, COUNT(*) as cnt FROM s2s3n WHERE length(cw1) >= 6 GROUP BY cw1 HAVING COUNT(*) <= 40;
+
+            COPY (
+                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'name_w1' AS channel
+                FROM s1n a 
+                JOIN s2s3n b ON a.cw1 = b.cw1 AND a.country = b.country
+                JOIN s2s3_w1_freq f ON a.cw1 = f.cw1
+                WHERE length(a.cw1) >= 6 AND a.entity_id <> b.entity_id
+            ) TO '{fwd9}' (DELIMITER '\t', HEADER true);
+
+            DROP TABLE s2s3_w1_freq;
+        """)
+    ch_files.append(p9)
+
+    con.close()
+    for f in [db_path, db_path + ".wal"]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except: pass
+
+    # Token channels CH3 & CH4
+    p3 = tmp / "ch3.tsv"
+    p4 = tmp / "ch4.tsv"
+    if (not p3.exists() or p3.stat().st_size < 100) or (not p4.exists() or p4.stat().st_size < 100):
+        log.info("  Generating Token channels (CH3, CH4) ...")
+        MIN_TOK_LEN = 3; MAX_RARE_FREQ = 200; MAX_MED_FREQ = 5000; MIN_MED_SH = 2
+
+        s23_tok = (s2s3n[["entity_id", "name_alphanum"]]
+                   .assign(token=s2s3n["name_alphanum"].str.split()).explode("token"))
+        s23_tok = s23_tok[s23_tok["token"].str.len() >= MIN_TOK_LEN].copy()
+        freq = s23_tok.groupby("token")["entity_id"].nunique()
+        tok_rare   = s23_tok[s23_tok["token"].isin(freq[freq <= MAX_RARE_FREQ].index)][["token", "entity_id"]].drop_duplicates()
+        tok_medium = s23_tok[s23_tok["token"].isin(
+            freq[(freq > MAX_RARE_FREQ) & (freq <= MAX_MED_FREQ)].index
+        )][["token", "entity_id"]].drop_duplicates()
+        del s23_tok
+
+        s1_tok = (s1n[["entity_id", "name_alphanum"]]
+                  .assign(token=s1n["name_alphanum"].str.split()).explode("token"))
+        s1_tok = s1_tok[s1_tok["token"].str.len() >= MIN_TOK_LEN].copy()
+
+        # CH3
+        if not p3.exists() or p3.stat().st_size < 100:
+            db3 = str(tmp / "_ddb3.db")
+            for f in [db3, db3 + ".wal"]:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
+            c3 = duckdb.connect(database=db3)
+            c3.execute("SET memory_limit='12GB'")
+            c3.register("s1_tok", s1_tok)
+            c3.register("tok_rare", tok_rare)
+            fwd3 = str(p3).replace("\\", "/")
+            c3.execute(f"""
+                COPY (
+                    SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'token_rare' AS channel
+                    FROM s1_tok a JOIN tok_rare b ON a.token = b.token
+                    WHERE a.entity_id <> b.entity_id
+                ) TO '{fwd3}' (DELIMITER '\t', HEADER true)
+            """)
+            c3.close()
+            for f in [db3, db3 + ".wal"]:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
+
+        # CH4
+        if not p4.exists() or p4.stat().st_size < 100:
+            db4 = str(tmp / "_ddb4.db")
+            for f in [db4, db4 + ".wal"]:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
+            c4 = duckdb.connect(database=db4)
+            c4.execute("SET memory_limit='12GB'")
+            c4.register("s1_tok", s1_tok)
+            c4.register("tok_medium", tok_medium)
+            fwd4 = str(p4).replace("\\", "/")
+            c4.execute(f"""
+                COPY (
+                    SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'token_medium' AS channel
+                    FROM s1_tok a JOIN tok_medium b ON a.token = b.token
+                    WHERE a.entity_id <> b.entity_id
+                    GROUP BY a.entity_id, b.entity_id
+                    HAVING COUNT(*) >= {MIN_MED_SH}
+                ) TO '{fwd4}' (DELIMITER '\t', HEADER true)
+            """)
+            c4.close()
+            for f in [db4, db4 + ".wal"]:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
+
+        del s1_tok, tok_rare, tok_medium, freq
+        gc.collect()
+
+    ch_files.append(p3)
+    ch_files.append(p4)
+
+    log.info("  9 blocking channels ready in %.1f min.", (time.time() - t0) / 60)
+    return ch_files
+
+
+def deduplicate_channels_to_flat(ch_files: list[pathlib.Path], out_flat: pathlib.Path) -> None:
+    """Deduplicate all channel candidate pairs into a single flat TSV using DuckDB."""
+    if out_flat.exists() and out_flat.stat().st_size > 100_000_000:
+        log.info("  Reusing flat candidates %s (%.1f MB)", out_flat.name, out_flat.stat().st_size / 1e6)
+        return
+
+    log.info("=== Deduplicating Channels to %s ===", out_flat.name)
+    t0 = time.time()
+    db_u = str(out_flat.parent / "_ddb_union.db")
+    for f in [db_u, db_u + ".wal"]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except: pass
+
+    con = duckdb.connect(database=db_u)
+    con.execute("SET memory_limit='14GB'")
+    con.execute(f"SET threads={os.cpu_count() or 4}")
+
+    queries = []
+    for p in ch_files:
+        if p.exists() and p.stat().st_size > 100:
+            fwd = str(p).replace("\\", "/")
+            queries.append(f"SELECT s1_id, target_id, channel FROM read_csv_auto('{fwd}', delim='\t')")
+
+    selects = " UNION ALL ".join(queries)
+    fwd_out = str(out_flat).replace("\\", "/")
+
+    con.execute(f"""
+        COPY (
+            SELECT s1_id, target_id, min(channel) as channel
+            FROM ({selects})
+            GROUP BY s1_id, target_id
+        ) TO '{fwd_out}' (DELIMITER '\t', HEADER true)
+    """)
+    con.close()
+    for f in [db_u, db_u + ".wal"]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except: pass
+
+    mb = out_flat.stat().st_size / 1e6
+    log.info("  Deduplication complete: %s (%.1f MB) in %.1f min.", out_flat.name, mb, (time.time() - t0) / 60)
+
+
+# =============================================================================
+# FAST FEATURE EXTRACTION & DATASET PREPARATION
+# =============================================================================
+
+def compute_string_features_fast(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute vectorized Rapidfuzz string features."""
+    a_name = df["a_name"].fillna("").astype(str).tolist()
+    b_name = df["b_name"].fillna("").astype(str).tolist()
+    a_exp  = df["a_exp"].fillna("").astype(str).tolist()
+    b_exp  = df["b_exp"].fillna("").astype(str).tolist()
+    a_addr = df["a_addr"].fillna("").astype(str).tolist()
+    b_addr = df["b_addr"].fillna("").astype(str).tolist()
+
+    df["name_token_sort_ratio"]    = [rf_fuzz.token_sort_ratio(a, b) / 100.0 for a, b in zip(a_name, b_name)]
+    df["name_partial_ratio"]       = [rf_fuzz.partial_ratio(a, b) / 100.0 for a, b in zip(a_name, b_name)]
+    df["name_expanded_sort_ratio"] = [rf_fuzz.token_sort_ratio(a, b) / 100.0 for a, b in zip(a_exp, b_exp)]
+    df["name_qratio"]              = [rf_fuzz.QRatio(a, b) / 100.0 for a, b in zip(a_name, b_name)]
+    df["name_jaro_winkler"]        = [rf_dist.JaroWinkler.similarity(a, b) for a, b in zip(a_name, b_name)]
+    df["addr_jaro_winkler"]        = [rf_dist.JaroWinkler.similarity(a, b) for a, b in zip(a_addr, b_addr)]
+
+    # Fast addr jaccard
+    f_jaccard = []
+    for a, b in zip(a_addr, b_addr):
+        if not a or not b:
+            f_jaccard.append(0.0)
+        elif a == b:
+            f_jaccard.append(1.0)
+        else:
+            sa, sb = set(a.split()), set(b.split())
+            un = len(sa | sb)
+            f_jaccard.append(len(sa & sb) / un if un else 0.0)
+    df["addr_token_jaccard"] = f_jaccard
+
+    # Fast token len ratio
+    f_tok_len = []
+    for a, b in zip(a_name, b_name):
+        la = len(a.split())
+        lb = len(b.split())
+        f_tok_len.append(min(la, lb) / max(la, lb, 1))
+    df["name_token_len_ratio"] = f_tok_len
+
+    # Drop raw string columns to save memory
+    df.drop(columns=["a_name", "b_name", "a_exp", "b_exp", "a_addr", "b_addr"], inplace=True, errors="ignore")
+    return df
+
+
+def generate_fold_features(
+    con: duckdb.DuckDBPyConnection,
+    cands_query: str,
+    norm_parquet: pathlib.Path,
+    out_parquet: pathlib.Path,
+    batch_size: int = 250_000,
+) -> None:
+    """Stream candidate pairs, join with normalized sources in DuckDB, compute features, save to Parquet."""
+    if out_parquet.exists() and out_parquet.stat().st_size > 1000:
+        log.info("  Reusing %s (%.1f MB)", out_parquet.name, out_parquet.stat().st_size / 1e6)
+        return
+
+    log.info("  Generating %s ...", out_parquet.name)
+    t0 = time.time()
+    fwd_norm = str(norm_parquet).replace("\\", "/")
+
+    join_sql = f"""
+        WITH cands AS (
+            {cands_query}
+        )
+        SELECT 
+            c.s1_id, c.target_id,
+            s1.name_alphanum AS a_name,
+            tgt.name_alphanum AS b_name,
+            s1.name_expanded AS a_exp,
+            tgt.name_expanded AS b_exp,
+            s1.addr_alphanum AS a_addr,
+            tgt.addr_alphanum AS b_addr,
+            (s1.country = tgt.country)::FLOAT AS country_match,
+            (s1.name_sorted = tgt.name_sorted)::FLOAT AS name_sorted_exact,
+            (s1.name_alphanum = tgt.name_alphanum)::FLOAT AS name_alphanum_exact,
+            (s1.name_prefix5 = tgt.name_prefix5)::FLOAT AS name_prefix5_exact,
+            (s1.addr_prefix4 = tgt.addr_prefix4)::FLOAT AS addr_prefix4_match,
+            ((s1.addr_numeric = tgt.addr_numeric) AND length(s1.addr_numeric) >= 2)::FLOAT AS addr_numeric_match,
+            (least(length(s1.name_alphanum), length(tgt.name_alphanum))::FLOAT / 
+             greatest(length(s1.name_alphanum), length(tgt.name_alphanum), 1)::FLOAT) AS name_len_ratio,
+            c.label::INT AS label
+        FROM cands c
+        JOIN read_parquet('{fwd_norm}') s1 ON c.s1_id = s1.entity_id
+        JOIN read_parquet('{fwd_norm}') tgt ON c.target_id = tgt.entity_id
+    """
+
+    reader = con.execute(join_sql).arrow()
+    batches = []
+    total_rows = 0
+
+    while True:
+        try:
+            arrow_batch = reader.read_next_batch()
+        except StopIteration:
+            break
+        df_chunk = arrow_batch.to_pandas()
+        if df_chunk.empty:
+            continue
+
+        df_feat = compute_string_features_fast(df_chunk)
+        batches.append(df_feat)
+        total_rows += len(df_feat)
+
+    all_df = pd.concat(batches, ignore_index=True)
+    out_parquet.parent.mkdir(parents=True, exist_ok=True)
+    all_df.to_parquet(out_parquet, index=False)
+    log.info("  Saved %s: %d pairs (pos=%d) in %.1f s", out_parquet.name, total_rows, int(all_df['label'].sum()), time.time() - t0)
+    del all_df, batches
+    gc.collect()
+
+
+# =============================================================================
+# MODEL TRAINING & MACRO F0.5 TUNING
+# =============================================================================
+
+def compute_macro_f05(
+    all_eval_s1_ids: set[str],
+    gt_map: dict[str, set[str]],
+    eval_pairs: pd.DataFrame,
+    probs: np.ndarray,
+    thresh: float,
+) -> float:
+    """Compute exact macro-average F0.5 per S1 entity including singletons."""
+    above = eval_pairs[probs >= thresh]
+    pred_map = {s: set() for s in all_eval_s1_ids}
+    for s, t in zip(above["s1_id"].values, above["target_id"].values):
+        if s in pred_map:
+            pred_map[s].add(t)
+
+    scores = []
+    for s in all_eval_s1_ids:
+        gt = gt_map.get(s, set())
+        pred = pred_map.get(s, set())
+        if not gt:  # Singleton
+            scores.append(1.0 if not pred else 0.0)
+        else:
+            if not pred:
+                scores.append(0.0)
+            else:
+                tp = len(gt & pred)
+                p = tp / len(pred)
+                r = tp / len(gt)
+                denom = 0.25 * p + r
+                scores.append(1.25 * p * r / denom if denom > 0 else 0.0)
+
+    return float(np.mean(scores))
+
+
+def train_model(
+    feat_train: pathlib.Path,
+    feat_val: pathlib.Path,
+    val_s1_ids: set[str],
+    gt_map: dict[str, set[str]],
+    model_out: pathlib.Path,
+    threshold_out: pathlib.Path,
+) -> float:
+    """Train LightGBM and tune threshold on macro-average F0.5."""
+    log.info("=== Training LightGBM Classifier ===")
+    t0 = time.time()
+
+    log.info("  Loading training features %s ...", feat_train.name)
+    tr = pd.read_parquet(feat_train)
+    log.info("  Loading validation features %s ...", feat_val.name)
+    va = pd.read_parquet(feat_val)
+
+    X_tr, y_tr = tr[FEAT_COLS].values.astype("float32"), tr["label"].astype(int).values
+    X_va, y_va = va[FEAT_COLS].values.astype("float32"), va["label"].astype(int).values
+
+    pos, neg = int(y_tr.sum()), int((y_tr == 0).sum())
+    spw = max(1, neg // max(pos, 1))
+    log.info("  Train data: pos=%d, neg=%d, scale_pos_weight=%d", pos, neg, spw)
+
+    model = lgb.LGBMClassifier(
+        objective="binary",
+        boosting_type="gbdt",
+        num_leaves=127,
+        learning_rate=0.05,
+        n_estimators=600,
+        min_child_samples=30,
+        subsample=0.8,
+        subsample_freq=1,
+        colsample_bytree=0.8,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        scale_pos_weight=spw,
+        random_state=SEED,
+        n_jobs=-1,
+        verbose=-1,
+    )
+
+    log.info("  Fitting LightGBM with early stopping (30 rounds) ...")
+    model.fit(
+        X_tr, y_tr,
+        eval_set=[(X_va, y_va)],
+        callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(50)],
+    )
+
+    model_out.parent.mkdir(parents=True, exist_ok=True)
+    model.booster_.save_model(str(model_out))
+    log.info("  Model saved to %s (best_iter=%d)", model_out.name, model.best_iteration_)
+
+    # Threshold tuning on MACRO F0.5
+    log.info("  Predicting probabilities on validation set ...")
+    va_probs = model.predict_proba(X_va)[:, 1]
+
+    log.info("  Tuning threshold on MACRO F0.5 (including singletons) ...")
+    best_score = -1.0
+    best_thresh = 0.50
+    for t in np.arange(0.15, 0.86, 0.02):
+        score = compute_macro_f05(val_s1_ids, gt_map, va[["s1_id", "target_id"]], va_probs, t)
+        if score > best_score:
+            best_score = score
+            best_thresh = t
+
+    log.info("  >>> OPTIMAL MACRO F0.5: %.4f at threshold %.2f <<<", best_score, best_thresh)
+    threshold_out.write_text(f"{best_thresh:.4f}\n", encoding="utf-8")
+    return best_thresh
+
+
+def fit_calibrator(feat_c_path: pathlib.Path, model_path: pathlib.Path, cal_out: pathlib.Path) -> None:
+    """Fit isotonic calibrator on Fold C."""
+    log.info("=== Fitting Isotonic Calibrator on %s ===", feat_c_path.name)
+    df = pd.read_parquet(feat_c_path)
+    X = df[FEAT_COLS].values.astype("float32")
+    y = df["label"].astype(int).values
+
+    booster = lgb.Booster(model_file=str(model_path))
+    raw_probs = booster.predict(X)
+
+    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    iso.fit(raw_probs, y)
+
+    cal_out.parent.mkdir(parents=True, exist_ok=True)
+    with open(cal_out, "wb") as f:
+        pickle.dump(iso, f)
+    log.info("  Calibrator saved to %s", cal_out.name)
+
+
+def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, float]:
+    """Execute Steps 1 to 5: train data loading, blocking verification, feature extraction, LightGBM training, and calibration."""
+    # 1. Load train data & splits
+    log.info("\n[STEP 1] Loading Training Sources & Splits ...")
+    s1_train = pd.read_csv(TRAIN_DIR / "train_source1.tsv", sep="\t", dtype=str, keep_default_na=False)
+    s2_train = pd.read_csv(TRAIN_DIR / "train_source2.tsv", sep="\t", dtype=str, keep_default_na=False)
+    s3_train = pd.read_csv(TRAIN_DIR / "train_source3.tsv", sep="\t", dtype=str, keep_default_na=False)
+    gt_df    = pd.read_csv(TRAIN_DIR / "train_ground_truth.tsv", sep="\t", dtype=str, keep_default_na=False)
+
+    log.info("  Train counts: S1=%d, S2=%d, S3=%d, GT=%d", len(s1_train), len(s2_train), len(s3_train), len(gt_df))
+
+    split_df = pd.read_csv(ARTS / "entity_split.tsv", sep="\t", dtype=str)
+    folds = {fold: set(split_df[split_df["fold"] == fold]["source1_entity_id"]) for fold in ("A", "B", "C", "D")}
+
+    gt_map = {}
+    for _, row in gt_df.iterrows():
+        s = row["source1_entity_id"]
+        raw = row["matched_entity_ids"].strip()
+        matched_set = set(raw.split(",")) if raw else set()
+        gt_map[s] = matched_set
+
+    # Normalized train cache
+    train_norm_cache = ARTS / "train_sources_norm.parquet"
+    train_flat = ARTS / "candidate_pairs_all_folds_flat.tsv"
+
+    if train_flat.exists() and train_flat.stat().st_size > 100_000_000:
+        log.info("  Reusing existing flat train candidates %s (%.1f MB)", train_flat.name, train_flat.stat().st_size / 1e6)
+    else:
+        if train_norm_cache.exists():
+            log.info("  Loading cached normalized training sources ...")
+            all_train_norm = pd.read_parquet(train_norm_cache)
+            s1n = all_train_norm[all_train_norm["entity_id"].str.startswith("S1-")].copy()
+            s2s3n = all_train_norm[~all_train_norm["entity_id"].str.startswith("S1-")].copy()
+        else:
+            log.info("  Normalizing training sources ...")
+            s1n = normalize_sources(s1_train)
+            s2n = normalize_sources(s2_train)
+            s3n = normalize_sources(s3_train)
+            s2s3n = pd.concat([s2n, s3n], ignore_index=True)
+            del s2n, s3n
+            all_train_norm = pd.concat([s1n, s2s3n], ignore_index=True)
+            all_train_norm.to_parquet(train_norm_cache, index=False)
+        ch_files = build_blocking_channels(s1n, s2s3n, TMP_TRAIN)
+        deduplicate_channels_to_flat(ch_files, train_flat)
+        del s1n, s2s3n, all_train_norm
+        gc.collect()
+
+    # Verify Phase 4 Recall on Fold D
+    log.info("\n[STEP 2] Verifying Phase 4 Recall on Fold D ...")
+    con = duckdb.connect()
+    con.execute("SET memory_limit='12GB'")
+    con.execute(f"SET threads={os.cpu_count() or 4}")
+    con.register("split_df", split_df)
+    con.register("gt_df", gt_df)
+
+    found_d, total_d = con.execute(f"""
+        WITH gt_d AS (
+            SELECT g.source1_entity_id AS s1_id, UNNEST(string_split(g.matched_entity_ids, ',')) AS target_id
+            FROM gt_df g
+            JOIN split_df s ON g.source1_entity_id = s.source1_entity_id
+            WHERE s.fold = 'D' AND g.matched_entity_ids <> ''
+        ),
+        cand AS (
+            SELECT s1_id, target_id FROM read_csv_auto('{str(train_flat).replace(chr(92), "/")}', delim='\t')
+            WHERE s1_id IN (SELECT s1_id FROM gt_d)
+        )
+        SELECT COUNT(c.target_id), (SELECT COUNT(*) FROM gt_d)
+        FROM gt_d g JOIN cand c ON g.s1_id = c.s1_id AND g.target_id = c.target_id
+    """).fetchone()
+    recall_d = found_d / total_d if total_d > 0 else 0.0
+    log.info("  >>> PHASE 4 RECALL ON FOLD D: %d / %d (%.2f%%) <<<", found_d, total_d, recall_d * 100)
+
+    # Feature extraction for Folds A, B, C using DuckDB joins
+    log.info("\n[STEP 3] Fast Feature Extraction for Folds A, B, C ...")
+    fwd_flat = str(train_flat).replace("\\", "/")
+
+    # Fold A query: ~600k true positives + ~1.2M blocker negatives
+    query_fold_a = f"""
+        WITH gt_a AS (
+            SELECT g.source1_entity_id AS s1_id, UNNEST(string_split(g.matched_entity_ids, ',')) AS target_id, 1 AS label
+            FROM gt_df g
+            JOIN split_df s ON g.source1_entity_id = s.source1_entity_id
+            WHERE s.fold = 'A' AND g.matched_entity_ids <> ''
+            LIMIT 700000
+        ),
+        neg_a AS (
+            SELECT c.s1_id, c.target_id, 0 AS label
+            FROM read_csv_auto('{fwd_flat}', delim='\t') c
+            JOIN split_df s ON c.s1_id = s.source1_entity_id
+            WHERE s.fold = 'A' AND random() < 0.03
+            LIMIT 1200000
+        )
+        SELECT s1_id, target_id, label FROM gt_a
+        UNION ALL
+        SELECT n.s1_id, n.target_id, n.label 
+        FROM neg_a n
+        LEFT JOIN gt_a g ON n.s1_id = g.s1_id AND n.target_id = g.target_id
+        WHERE g.target_id IS NULL
+    """
+    feat_a = ARTS / "features_fold_a.parquet"
+    generate_fold_features(con, query_fold_a, train_norm_cache, feat_a)
+
+    # Fold B query: all true positives in B + ~400k blocker negatives
+    query_fold_b = f"""
+        WITH gt_b AS (
+            SELECT g.source1_entity_id AS s1_id, UNNEST(string_split(g.matched_entity_ids, ',')) AS target_id, 1 AS label
+            FROM gt_df g
+            JOIN split_df s ON g.source1_entity_id = s.source1_entity_id
+            WHERE s.fold = 'B' AND g.matched_entity_ids <> ''
+        ),
+        neg_b AS (
+            SELECT c.s1_id, c.target_id, 0 AS label
+            FROM read_csv_auto('{fwd_flat}', delim='\t') c
+            JOIN split_df s ON c.s1_id = s.source1_entity_id
+            WHERE s.fold = 'B' AND random() < 0.04
+            LIMIT 500000
+        )
+        SELECT s1_id, target_id, label FROM gt_b
+        UNION ALL
+        SELECT n.s1_id, n.target_id, n.label 
+        FROM neg_b n
+        LEFT JOIN gt_b g ON n.s1_id = g.s1_id AND n.target_id = g.target_id
+        WHERE g.target_id IS NULL
+    """
+    feat_b = ARTS / "features_fold_b.parquet"
+    generate_fold_features(con, query_fold_b, train_norm_cache, feat_b)
+
+    # Fold C query: ~100k true positives + ~100k blocker negatives
+    query_fold_c = f"""
+        WITH gt_c AS (
+            SELECT g.source1_entity_id AS s1_id, UNNEST(string_split(g.matched_entity_ids, ',')) AS target_id, 1 AS label
+            FROM gt_df g
+            JOIN split_df s ON g.source1_entity_id = s.source1_entity_id
+            WHERE s.fold = 'C' AND g.matched_entity_ids <> ''
+            LIMIT 100000
+        ),
+        neg_c AS (
+            SELECT c.s1_id, c.target_id, 0 AS label
+            FROM read_csv_auto('{fwd_flat}', delim='\t') c
+            JOIN split_df s ON c.s1_id = s.source1_entity_id
+            WHERE s.fold = 'C' AND random() < 0.01
+            LIMIT 100000
+        )
+        SELECT s1_id, target_id, label FROM gt_c
+        UNION ALL
+        SELECT n.s1_id, n.target_id, n.label 
+        FROM neg_c n
+        LEFT JOIN gt_c g ON n.s1_id = g.s1_id AND n.target_id = g.target_id
+        WHERE g.target_id IS NULL
+    """
+    feat_c = ARTS / "features_fold_c.parquet"
+    generate_fold_features(con, query_fold_c, train_norm_cache, feat_c)
+
+    # Train LightGBM & Sweep Threshold on Fold B
+    log.info("\n[STEP 4] LightGBM Model Training ...")
+    model_path = ARTS / "lgbm_model.txt"
+    thresh_path = ARTS / "threshold.txt"
+    best_thresh = train_model(
+        feat_a,
+        feat_b,
+        folds["B"],
+        gt_map,
+        model_path,
+        thresh_path,
+    )
+
+    # Calibration on Fold C
+    log.info("\n[STEP 5] Isotonic Calibration ...")
+    cal_path = ARTS / "calibrator.pkl"
+    fit_calibrator(feat_c, model_path, cal_path)
+
+    # Clean up train data memory before test inference
+    del s1_train, s2_train, s3_train, gt_df, split_df, gt_map
+    gc.collect()
+
+    return model_path, thresh_path, cal_path, best_thresh
+
+
+# =============================================================================
+# TEST INFERENCE & RESOLUTION
+# =============================================================================
+
+def stream_score_test_candidates(
+    con: duckdb.DuckDBPyConnection,
+    test_flat_path: pathlib.Path,
+    test_norm_path: pathlib.Path,
+    model_path: pathlib.Path,
+    cal_path: pathlib.Path,
+    threshold: float,
+) -> pd.DataFrame:
+    """Stream test candidate pairs through DuckDB join + LightGBM scoring in memory."""
+    log.info("=== Streaming & Scoring Test Candidate Pairs ===")
+    t0 = time.time()
+    booster = lgb.Booster(model_file=str(model_path))
+    with open(cal_path, "rb") as f:
+        iso = pickle.load(f)
+
+    fwd_flat = str(test_flat_path).replace("\\", "/")
+    fwd_norm = str(test_norm_path).replace("\\", "/")
+
+    query = f"""
+        WITH cands AS (
+            SELECT s1_id, target_id 
+            FROM read_csv('{fwd_flat}', delim='\t', header=true, columns={{'s1_id': 'VARCHAR', 'target_id': 'VARCHAR', 'channel': 'VARCHAR'}})
+        )
+        SELECT 
+            c.s1_id, c.target_id,
+            s1.name_alphanum AS a_name,
+            tgt.name_alphanum AS b_name,
+            s1.name_expanded AS a_exp,
+            tgt.name_expanded AS b_exp,
+            s1.addr_alphanum AS a_addr,
+            tgt.addr_alphanum AS b_addr,
+            1.0::FLOAT AS country_match,
+            (s1.name_sorted = tgt.name_sorted)::FLOAT AS name_sorted_exact,
+            (s1.name_alphanum = tgt.name_alphanum)::FLOAT AS name_alphanum_exact,
+            (s1.name_prefix5 = tgt.name_prefix5)::FLOAT AS name_prefix5_exact,
+            (s1.addr_prefix4 = tgt.addr_prefix4)::FLOAT AS addr_prefix4_match,
+            ((s1.addr_numeric = tgt.addr_numeric) AND length(s1.addr_numeric) >= 2)::FLOAT AS addr_numeric_match,
+            (least(length(s1.name_alphanum), length(tgt.name_alphanum))::FLOAT / 
+             greatest(length(s1.name_alphanum), length(tgt.name_alphanum), 1)::FLOAT) AS name_len_ratio
+        FROM cands c
+        JOIN read_parquet('{fwd_norm}') s1 ON c.s1_id = s1.entity_id
+        JOIN read_parquet('{fwd_norm}') tgt ON c.target_id = tgt.entity_id
+    """
+
+    reader = con.execute(query).arrow(200000)
+    passing_dfs = []
+    batch_idx = 0
+    total_scored = 0
+
+    while True:
+        try:
+            arrow_batch = reader.read_next_batch()
+        except StopIteration:
+            break
+        batch_idx += 1
+        df_chunk = arrow_batch.to_pandas()
+        if df_chunk.empty:
+            continue
+
+        n_rows = len(df_chunk)
+        total_scored += n_rows
+
+        df_feat = compute_string_features_fast(df_chunk)
+        X = df_feat[FEAT_COLS].values.astype(np.float32)
+        raw_probs = booster.predict(X, num_threads=10)
+        cal_probs = iso.predict(raw_probs)
+
+        # Filter strictly above threshold
+        mask = cal_probs >= threshold
+        if np.any(mask):
+            pass_df = pd.DataFrame({
+                "s1_id": df_feat.loc[mask, "s1_id"].values,
+                "target_id": df_feat.loc[mask, "target_id"].values,
+                "cal_prob": cal_probs[mask],
+            })
+            passing_dfs.append(pass_df)
+
+        if batch_idx % 5 == 0:
+            log.info("    batch %d (%d pairs scored, %.1f min)", batch_idx, total_scored, (time.time() - t0) / 60)
+
+    all_passing = pd.concat(passing_dfs, ignore_index=True) if passing_dfs else pd.DataFrame(columns=["s1_id", "target_id", "cal_prob"])
+    log.info("  Scored %d candidate pairs; %d passed threshold %.2f in %.1f min.", total_scored, len(all_passing), threshold, (time.time() - t0) / 60)
+    return all_passing
+
+
+def resolve_matches_and_candidates(
+    con_test: duckdb.DuckDBPyConnection,
+    passing_pairs: pd.DataFrame,
+    test_flat_path: pathlib.Path,
+    all_test_s1_ids: list[str],
+    matching_out: pathlib.Path,
+    cand_pairs_out: pathlib.Path,
+) -> None:
+    """Apply greedy target deduplication and write both compliant matching_results.tsv and candidate_pairs.tsv."""
+    log.info("=== Resolving Final Matches and Candidates ===")
+    t0 = time.time()
+
+    # Target-side greedy deduplication:
+    # If multiple S1 entities match the same target entity, assign to highest confidence S1
+    if not passing_pairs.empty:
+        passing_pairs = passing_pairs.sort_values("cal_prob", ascending=False).drop_duplicates(subset=["target_id"], keep="first")
+        log.info("  Pairs after target deduplication: %d", len(passing_pairs))
+
+    pred_map = {s: [] for s in all_test_s1_ids}
+    if not passing_pairs.empty:
+        for s, t in zip(passing_pairs["s1_id"].values, passing_pairs["target_id"].values):
+            if s in pred_map:
+                pred_map[s].append(t)
+
+    # 1. Write matching_results.tsv
+    matching_rows = [{"source1_entity_id": s, "matched_entity_ids": ",".join(pred_map[s])} for s in all_test_s1_ids]
+    match_df = pd.DataFrame(matching_rows, columns=["source1_entity_id", "matched_entity_ids"])
+    matching_out.parent.mkdir(parents=True, exist_ok=True)
+    match_df.to_csv(matching_out, sep="\t", index=False, encoding="utf-8")
+
+    singletons = int((match_df["matched_entity_ids"] == "").sum())
+    log.info("  %s written: %d total rows (Singletons: %d, Matched: %d) in %.1f s", 
+             matching_out.name, len(match_df), singletons, len(match_df) - singletons, time.time() - t0)
+
+    # 2. Write candidate_pairs.tsv prioritizing any matched IDs
+    log.info("  Writing %s with match prioritization ...", cand_pairs_out.name)
+    fwd_test_flat = str(test_flat_path).replace("\\", "/")
+    
+    # Extract top 95 candidate IDs from test_flat
+    top_cands = con_test.execute(f"""
+        WITH ranked AS (
+            SELECT s1_id, target_id,
+                   ROW_NUMBER() OVER (PARTITION BY s1_id ORDER BY channel, target_id) AS rn
+            FROM read_csv('{fwd_test_flat}', delim='\t', header=true, columns={{'s1_id': 'VARCHAR', 'target_id': 'VARCHAR', 'channel': 'VARCHAR'}})
+        )
+        SELECT s1_id, string_agg(target_id, ',') AS cands
+        FROM ranked
+        WHERE rn <= 95
+        GROUP BY s1_id
+    """).df()
+
+    cand_dict = dict(zip(top_cands["s1_id"], top_cands["cands"]))
+    del top_cands
+    gc.collect()
+
+    cand_rows = []
+    for s in all_test_s1_ids:
+        matches = pred_map.get(s, [])
+        cand_str = cand_dict.get(s, "")
+        other_cands = cand_str.split(",") if cand_str else []
+        combined = []
+        seen = set()
+        for m in matches:
+            if m and m not in seen:
+                seen.add(m)
+                combined.append(m)
+        for c in other_cands:
+            if c and c not in seen:
+                seen.add(c)
+                combined.append(c)
+            if len(combined) >= 100:
+                break
+        cand_rows.append({"source1_entity_id": s, "candidate_entity_ids": ",".join(combined)})
+
+    cand_df = pd.DataFrame(cand_rows, columns=["source1_entity_id", "candidate_entity_ids"])
+    cand_pairs_out.parent.mkdir(parents=True, exist_ok=True)
+    cand_df.to_csv(cand_pairs_out, sep="\t", index=False, encoding="utf-8")
+    log.info("  %s written: %d total rows (%.1f MB) in %.1f s", 
+             cand_pairs_out.name, len(cand_df), cand_pairs_out.stat().st_size / 1e6, time.time() - t0)
+
+
+# =============================================================================
+# MAIN ORCHESTRATION
+# =============================================================================
+
+def main():
+    global ARTS, TRAIN_DIR, TEST_DIR, OUT_DIR
+
+    parser = argparse.ArgumentParser(description="Dunder Business Entity Resolution Pipeline")
+    parser.add_argument("--mode", choices=["inference", "full", "train", "validate"],
+                        default="inference" if (ARTS / "lgbm_model.txt").exists() else "full",
+                        help="Execution mode: 'inference' (fast test reproduction using model weights), "
+                             "'full' (train from scratch + test inference), 'train' (training only), 'validate' (validate existing output files)")
+    parser.add_argument("--data-dir", type=str, default=None, help="Root dataset directory containing train/ and test/")
+    parser.add_argument("--output-dir", type=str, default=None, help="Target output directory")
+    parser.add_argument("--artifacts-dir", type=str, default=None, help="Target artifacts directory")
+    parser.add_argument("--skip-train-blocking", action="store_true", help="Skip regenerating train blocking channels")
+    args = parser.parse_args()
+
+    if args.data_dir:
+        d_p = pathlib.Path(args.data_dir).resolve()
+        TRAIN_DIR = d_p / "train" if (d_p / "train").exists() else d_p
+        TEST_DIR = d_p / "test" if (d_p / "test").exists() else d_p
+    if args.output_dir:
+        OUT_DIR = pathlib.Path(args.output_dir).resolve()
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+    if args.artifacts_dir:
+        ARTS = pathlib.Path(args.artifacts_dir).resolve()
+        ARTS.mkdir(parents=True, exist_ok=True)
+
+    matching_results_path = OUT_DIR / "matching_results.tsv"
+    cand_pairs_path = OUT_DIR / "candidate_pairs.tsv"
+
+    if args.mode == "validate":
+        log.info("Running Submission Validator on %s and %s ...", matching_results_path, cand_pairs_path)
+        val_script = None
+        for cand in [REPO / "utils" / "validate_submission.py", SRC_DIR / "utils" / "validate_submission.py"]:
+            if cand.exists():
+                val_script = cand
+                break
+        if not val_script:
+            log.error("validate_submission.py not found")
+            sys.exit(1)
+        res = subprocess.run([sys.executable, str(val_script), "--matching", str(matching_results_path),
+                             "--candidate", str(cand_pairs_path), "--test-dir", str(TEST_DIR)], capture_output=True, text=True)
+        print(res.stdout)
+        sys.exit(res.returncode)
+
+    t_total = time.time()
+    log.info("======================================================================")
+    log.info("STARTING COMPLETE BUSINESS ENTITY RESOLUTION PIPELINE (MODE: %s)", args.mode.upper())
+    log.info("  Repo root:      %s", REPO)
+    log.info("  Dataset test:   %s", TEST_DIR)
+    log.info("  Output dir:     %s", OUT_DIR)
+    log.info("  Artifacts dir:  %s", ARTS)
+    log.info("======================================================================")
+
+    model_path = ARTS / "lgbm_model.txt"
+    thresh_path = ARTS / "threshold.txt"
+    cal_path = ARTS / "calibrator.pkl"
+
+    if args.mode in ["inference"]:
+        if model_path.exists() and thresh_path.exists() and cal_path.exists():
+            best_thresh = float(thresh_path.read_text(encoding="utf-8").strip())
+            log.info("\n>>> USING PRETRAINED LIGHTGBM MODEL & CALIBRATOR (OPTIMAL THRESHOLD = %.4f) <<<", best_thresh)
+        else:
+            log.warning("Pretrained weights not found at %s. Falling back to training stage.", ARTS)
+            model_path, thresh_path, cal_path, best_thresh = run_training_stage()
+    else:
+        model_path, thresh_path, cal_path, best_thresh = run_training_stage()
+
+    if args.mode == "train":
+        log.info("Training completed successfully in %.1f minutes.", (time.time() - t_total) / 60)
+        return
+
+    # TEST SET PROCESSING
+    log.info("\n[STEP 6] Test Set Normalization & Multi-View Generation ...")
+    test_norm_cache = ARTS / "test_sources_norm.parquet"
+
+    ts1 = pd.read_csv(TEST_DIR / "test_source1.tsv", sep="\t", dtype=str, keep_default_na=False)
+    all_test_s1_ids = ts1["entity_id"].tolist()
+
+    if test_norm_cache.exists() and test_norm_cache.stat().st_size > 100_000_000:
+        log.info("  Reusing cached normalized test sources %s (%.1f MB)", test_norm_cache.name, test_norm_cache.stat().st_size / 1e6)
+    else:
+        ts2 = pd.read_csv(TEST_DIR / "test_source2.tsv", sep="\t", dtype=str, keep_default_na=False)
+        ts3 = pd.read_csv(TEST_DIR / "test_source3.tsv", sep="\t", dtype=str, keep_default_na=False)
+        log.info("  Test entities: S1=%d, S2=%d, S3=%d", len(ts1), len(ts2), len(ts3))
+
+        ts1n = normalize_sources(ts1)
+        ts2n = normalize_sources(ts2)
+        ts3n = normalize_sources(ts3)
+        ts2s3n = pd.concat([ts2n, ts3n], ignore_index=True)
+        del ts2, ts3, ts2n, ts3n
+        all_test_norm = pd.concat([ts1n, ts2s3n], ignore_index=True)
+        all_test_norm.to_parquet(test_norm_cache, index=False)
+        del ts1n, ts2s3n, all_test_norm
+        gc.collect()
+
+    # Test blocking
+    log.info("\n[STEP 7] Test 9-Channel Blocking ...")
+    test_flat = ARTS / "test_candidates_flat.tsv"
+    if not (test_flat.exists() and test_flat.stat().st_size > 50_000_000):
+        all_test_norm = pd.read_parquet(test_norm_cache)
+        ts1n = all_test_norm[all_test_norm["entity_id"].str.startswith("S1-")].copy()
+        ts2s3n = all_test_norm[~all_test_norm["entity_id"].str.startswith("S1-")].copy()
+        del all_test_norm
+        TMP_TEST = ARTS / "_tmp_test_channels"
+        test_ch_files = build_blocking_channels(ts1n, ts2s3n, TMP_TEST)
+        deduplicate_channels_to_flat(test_ch_files, test_flat)
+        del ts1n, ts2s3n
+        gc.collect()
+
+    # Test candidate scoring with streaming memory-efficient inference
+    log.info("\n[STEP 8] Streaming & Scoring Test Candidates ...")
+    con_test = duckdb.connect()
+    con_test.execute("SET memory_limit='14GB'")
+    con_test.execute(f"SET threads={os.cpu_count() or 4}")
+
+    passing_pairs = stream_score_test_candidates(
+        con_test,
+        test_flat,
+        test_norm_cache,
+        model_path,
+        cal_path,
+        best_thresh,
+    )
+    con_test.close()
+    gc.collect()
+
+    # Resolve matches and output matching_results.tsv & candidate_pairs.tsv
+    log.info("\n[STEP 9] Formatting output/matching_results.tsv & output/candidate_pairs.tsv ...")
+    matching_results_path = OUT_DIR / "matching_results.tsv"
+    cand_pairs_path = OUT_DIR / "candidate_pairs.tsv"
+    con_resolve = duckdb.connect()
+    con_resolve.execute("SET memory_limit='14GB'")
+    con_resolve.execute(f"SET threads={os.cpu_count() or 4}")
+    resolve_matches_and_candidates(
+        con_resolve,
+        passing_pairs,
+        test_flat,
+        all_test_s1_ids,
+        matching_results_path,
+        cand_pairs_path,
+    )
+    con_resolve.close()
+
+    # Phase 16 Validation
+    log.info("\n[STEP 10] Running Official Submission Validator ...")
+    val_script = None
+    for cand in [REPO / "utils" / "validate_submission.py", SRC_DIR / "utils" / "validate_submission.py"]:
+        if cand.exists():
+            val_script = cand
+            break
+    if val_script:
+        val_cmd = [
+            sys.executable, str(val_script),
+            "--matching", str(matching_results_path),
+            "--candidate", str(cand_pairs_path),
+            "--test-dir", str(TEST_DIR),
+        ]
+        res = subprocess.run(val_cmd, capture_output=True, text=True)
+        print(res.stdout)
+        if res.returncode != 0:
+            log.error("VALIDATION FAILED: %s", res.stderr)
+            sys.exit(1)
+        log.info(">>> VALIDATION PASSED: Files are 100% compliant and ready for scoring! <<<")
+
+    # Packaging
+    pkg_script = None
+    for cand in [REPO / "package_submission.py", SRC_DIR.parents[1] / "package_submission.py"]:
+        if cand.exists():
+            pkg_script = cand
+            break
+    if pkg_script:
+        log.info("\n[STEP 11] Creating Final Submission Package ...")
+        pkg_cmd = [sys.executable, str(pkg_script), "--team-name", "Dunder"]
+        res_pkg = subprocess.run(pkg_cmd, capture_output=True, text=True)
+        print(res_pkg.stdout)
+
+    log.info("\n" + "=" * 70)
+    log.info("PIPELINE FULLY COMPLETE IN %.1f MINUTES!", (time.time() - t_total) / 60)
+    log.info("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
