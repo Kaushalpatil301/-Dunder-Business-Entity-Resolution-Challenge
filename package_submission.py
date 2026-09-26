@@ -133,9 +133,8 @@ def main():
                 print(f"  + {arcname}")
                 total_files += 1
 
-    # 5. Timestamped backup copy
-    ts_copy = REPO / f"{team}_submission_{ts}.zip"
-    shutil.copyfile(zip_path, ts_copy)
+
+
 
     # 6. Verify zip structure
     print(f"\n[4] Verifying created archive {zip_name}...")
@@ -164,8 +163,7 @@ def main():
     print("\n" + "=" * 70)
     print("SUBMISSION PACKAGE SUCCESSFULLY CREATED & VERIFIED!")
     print("=" * 70)
-    print(f"Primary zip:     {zip_path} ({size_mb:.1f} MB, {total_files} files)")
-    print(f"Timestamped copy:{ts_copy.name}")
+    print(f"Zip file: {zip_path} ({size_mb:.1f} MB, {total_files} files)")
     print("\nStructure in archive:")
     print("  Dunder_submission.zip")
     print("  |-- output/")
