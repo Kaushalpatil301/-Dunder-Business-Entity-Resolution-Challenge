@@ -1,6 +1,9 @@
 import os
+import sys
 import pandas as pd
 import duckdb
+
+sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
 
 print("Analyzing GT misses on Fold D...")
 split = pd.read_csv('artifacts/entity_split.tsv', sep='\t')

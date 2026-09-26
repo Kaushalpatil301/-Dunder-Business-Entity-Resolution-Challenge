@@ -977,7 +977,7 @@ def stream_score_test_candidates(
             tgt.name_expanded AS b_exp,
             s1.addr_alphanum AS a_addr,
             tgt.addr_alphanum AS b_addr,
-            1.0::FLOAT AS country_match,
+            (s1.country = tgt.country)::FLOAT AS country_match,
             (s1.name_sorted = tgt.name_sorted)::FLOAT AS name_sorted_exact,
             (s1.name_alphanum = tgt.name_alphanum)::FLOAT AS name_alphanum_exact,
             (s1.name_prefix5 = tgt.name_prefix5)::FLOAT AS name_prefix5_exact,

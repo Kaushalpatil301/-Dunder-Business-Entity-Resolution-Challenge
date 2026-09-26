@@ -1,30 +1,30 @@
 #!/usr/bin/env python
 """
-run_full_pipeline.py — Master High-Performance Entity Resolution Pipeline (0.99 Target)
-========================================================================================
+run_full_pipeline.py — Master High-Performance Entity Resolution Pipeline
+========================================================================
 
 Architecture:
-1. Multi-View Normalization with Unicode NFKD Accent Stripping, Domain Stripping, DBA resolution.
-2. 11-Channel High-Yield Blocking in DuckDB (Targeting 98%+ candidate recall):
+1. 9-Channel Blocking in DuckDB (reusing CH1-CH9 flat candidates if present):
    - CH1: exact_sorted
    - CH2: exact_expanded_sorted
-   - CH3: token_rare (freq <= 200)
-   - CH4: token_medium (freq <= 5000, >= 2 shared)
-   - CH5: addr_composite (house number + first token + country, freq <= 50)
-   - CH6: exact_stripped_sorted (leetspeak normalized + legal suffixes removed, freq <= 100)
+   - CH3: token_rare
+   - CH4: token_medium
+   - CH5: addr_composite
+   - CH6: exact_stripped_sorted (leetspeak normalized + legal suffixes removed)
    - CH7: name_prefix2 (first 2 words + country, freq <= 50)
    - CH8: addr_street (house number + street name + country, freq <= 50)
-   - CH9: name_w1 (first distinctive word, len >= 6, freq <= 40)
-   - CH10: exact_nospace (spaceless stripped name + country, len >= 5, freq <= 50)
-   - CH11: addr_digits (sorted address numbers + country, len >= 3, freq <= 50)
-3. 17 Vectorized Pairwise Similarity Features (Rapidfuzz + DuckDB streaming joins).
-4. LightGBM classifier with early stopping & class imbalance compensation.
-5. Isotonic probability calibration on Fold C.
-6. Optimal threshold tuning DIRECTLY in calibrated probability space on Macro F0.5.
-7. Zero-disk streaming scoring of test candidate pairs.
-8. Target-side greedy deduplication + singleton preservation + cardinality capping (max 15).
-9. Output generation: output/matching_results.tsv and output/candidate_pairs.tsv.
-10. Automatic validation via utils/validate_submission.py and packaging via package_submission.py.
+   - CH9: name_w1 (first word + country, freq <= 40, len >= 6)
+2. Fast DuckDB + Rapidfuzz Feature Extraction (38,000+ pairs/sec, vectorized).
+3. LightGBM classifier with early stopping & optimal threshold tuning for MACRO F0.5.
+4. Isotonic probability calibration on Fold C.
+5. Test set multi-view normalization + 9-channel blocking.
+6. Zero-disk streaming scoring of test candidate pairs.
+7. Target-side greedy deduplication + singleton preservation.
+8. Output generation:
+   - output/candidate_pairs.tsv
+   - output/matching_results.tsv
+9. Automatic validation via utils/validate_submission.py.
+10. Automatic packaging via package_submission.py.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ import re
 import subprocess
 import sys
 import time
-import unicodedata
 
 REPO = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
@@ -102,8 +101,6 @@ FEAT_COLS = [
     "name_jaro_winkler",
     "name_sorted_exact",
     "name_alphanum_exact",
-    "name_nospace_exact",
-    "addr_digits_exact",
     "addr_token_jaccard",
     "addr_numeric_match",
     "addr_jaro_winkler",
@@ -139,28 +136,15 @@ _ABBR_MAP = {
 # =============================================================================
 
 def normalize_sources(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize business name, address, and extract blocking keys with Unicode NFKD & domain stripping."""
+    """Normalize business name, address, and extract blocking keys."""
     t0 = time.time()
     log.info("  Normalizing %d records ...", len(df))
 
     # Base name
     name_col = "business_name" if "business_name" in df.columns else ("name" if "name" in df.columns else None)
-    raw_name = (df[name_col] if name_col else pd.Series("", index=df.index)).fillna("").astype(str)
-
-    # 1. Unicode NFKD accent normalization (Sílver -> Silver, Fórwarders -> Forwarders)
-    name = raw_name.apply(lambda s: "".join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c)))
-    name = name.str.lower().str.strip()
+    name = (df[name_col] if name_col else pd.Series("", index=df.index)).fillna("").astype(str).str.lower().str.strip()
     name = name.str.replace(r"<null>", "", regex=True)
-
-    # 2. Strip DBA variations (Noviflux D.B.A. [Legal Name])
-    name = name.str.replace(r"^.*?\bd\.?b\.?a\.?\s+", "", regex=True)
-    name = name.str.replace(r"\bd\.?b\.?a\.?.*$", "", regex=True)
-
-    # 3. Strip honorifics & noise prefixes
-    name = name.str.replace(r"^(shri|smt|sri|dr|prof|m/s|messrs|the|--|[*]+)\s+", "", regex=True)
-
-    # 4. Strip web domains (.com, .org, .net, .in, etc.)
-    name = name.str.replace(r"\.(com|org|net|in|co|io|biz|info|us)\b", "", regex=True)
+    name = name.str.replace(r"^(smt|sri|--|[*]+)\s+", "", regex=True)
     name = name.str.replace(r"[^\w\s&]", " ", regex=True)
     name = name.str.replace(r"\s+", " ", regex=True).str.strip()
 
@@ -182,9 +166,6 @@ def normalize_sources(df: pd.DataFrame) -> pd.DataFrame:
     cname = cname.str.replace(r"\s+", " ", regex=True).str.strip()
     csorted = cname.str.split().apply(lambda t: " ".join(sorted(t)) if t else "")
 
-    # Spaceless view (dynamicmckinley.com -> dynamicmckinley == dynamic mckinley)
-    nospace = cname.str.replace(" ", "")
-
     # Prefix 2 words
     cpref2 = csorted.str.split().apply(lambda t: " ".join(t[:2]) if len(t) >= 2 else (t[0] if t else ""))
 
@@ -193,9 +174,7 @@ def normalize_sources(df: pd.DataFrame) -> pd.DataFrame:
 
     # Address
     addr_col = "business_address" if "business_address" in df.columns else ("address" if "address" in df.columns else None)
-    raw_addr = (df[addr_col] if addr_col else pd.Series("", index=df.index)).fillna("").astype(str)
-    addr = raw_addr.apply(lambda s: "".join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c)))
-    addr = addr.str.lower().str.strip()
+    addr = (df[addr_col] if addr_col else pd.Series("", index=df.index)).fillna("").astype(str).str.lower().str.strip()
     addr = addr.str.replace(r"<null>", "", regex=True)
     addr_alnum = addr.str.replace(r"[^a-z0-9 ]", " ", regex=True)
     addr_alnum = addr_alnum.str.replace(r"\s+", " ", regex=True).str.strip()
@@ -211,9 +190,6 @@ def normalize_sources(df: pd.DataFrame) -> pd.DataFrame:
     ex_street = addr_alnum.str.extract(r"(\d+)\s+([a-z0-9]{3,})", expand=True)
     addr_street = (ex_street[0].fillna("") + " " + ex_street[1].fillna("")).str.strip()
 
-    # Address digits set: captures Indic script records where address is English
-    addr_nums = addr_alnum.str.findall(r"\b\d+[a-z]?\b").apply(lambda t: "_".join(sorted(set(t))) if t else "")
-
     out = pd.DataFrame(index=df.index)
     out["entity_id"]            = df["entity_id"].astype(str)
     out["country"]              = df["country"].fillna("").astype(str)
@@ -223,7 +199,6 @@ def normalize_sources(df: pd.DataFrame) -> pd.DataFrame:
     out["name_expanded_sorted"] = exp_sorted
     out["name_prefix5"]         = sorted_view.str[:5]
     out["csort"]                = csorted
-    out["nospace"]              = nospace
     out["cpref2"]               = cpref2
     out["cw1"]                  = cw1
     out["addr_alphanum"]        = addr_alnum
@@ -231,33 +206,35 @@ def normalize_sources(df: pd.DataFrame) -> pd.DataFrame:
     out["addr_prefix4"]         = addr_prefix4
     out["addr_composite"]       = addr_comp
     out["addr_street"]          = addr_street
-    out["addr_nums"]            = addr_nums
 
     log.info("  Normalized in %.1f min.", (time.time() - t0) / 60)
     return out
 
 
 # =============================================================================
-# 11 BLOCKING CHANNELS
+# BLOCKING CHANNELS
 # =============================================================================
 
-def build_blocking_channels(norm_parquet: pathlib.Path, tmp: pathlib.Path) -> list[pathlib.Path]:
-    """Generate 11 high-yield blocking channels using pure zero-copy DuckDB SQL."""
-    log.info("=== Running 11-Channel High-Recall Blocking in DuckDB ===")
+def build_blocking_channels(s1n: pd.DataFrame, s2s3n: pd.DataFrame, tmp: pathlib.Path) -> list[pathlib.Path]:
+    """Generate 9 blocking channels using DuckDB."""
+    log.info("=== Running 9-Channel Blocking ===")
     t0 = time.time()
     tmp.mkdir(parents=True, exist_ok=True)
+    n_cpu = os.cpu_count() or 4
     ch_files = []
 
-    fwd_norm = str(norm_parquet).replace("\\", "/")
-    con = duckdb.connect()
-    con.execute("SET memory_limit='6GB'")
-    con.execute("SET threads=8")
-    con.execute("SET preserve_insertion_order=false")
+    db_path = str(tmp / "_ddb_exact.db")
+    for f in [db_path, db_path + ".wal"]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except: pass
 
-    con.execute(f"""
-        CREATE VIEW s1n AS SELECT * FROM read_parquet('{fwd_norm}') WHERE entity_id LIKE 'S1-%';
-        CREATE VIEW s2s3n AS SELECT * FROM read_parquet('{fwd_norm}') WHERE NOT entity_id LIKE 'S1-%';
-    """)
+    con = duckdb.connect(database=db_path)
+    con.execute("SET memory_limit='12GB'")
+    con.execute(f"SET threads={max(4, n_cpu // 2)}")
+    con.execute("SET preserve_insertion_order=false")
+    con.register("s1n", s1n)
+    con.register("s2s3n", s2s3n)
 
     # 1. CH1: exact_sorted
     p1 = tmp / "ch1.tsv"
@@ -392,108 +369,92 @@ def build_blocking_channels(norm_parquet: pathlib.Path, tmp: pathlib.Path) -> li
         """)
     ch_files.append(p9)
 
-    # 10. CH10: exact_nospace (domain & spaceless view)
-    p10 = tmp / "ch10.tsv"
-    if not p10.exists() or p10.stat().st_size < 100:
-        log.info("  Generating CH10: exact_nospace ...")
-        fwd10 = str(p10).replace("\\", "/")
-        con.execute(f"""
-            CREATE TEMP TABLE s2s3_ns_freq AS
-            SELECT nospace, COUNT(*) as cnt FROM s2s3n WHERE length(nospace) >= 5 GROUP BY nospace HAVING COUNT(*) <= 50;
+    con.close()
+    for f in [db_path, db_path + ".wal"]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except: pass
 
-            COPY (
-                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'exact_nospace' AS channel
-                FROM s1n a 
-                JOIN s2s3n b ON a.nospace = b.nospace AND a.country = b.country
-                JOIN s2s3_ns_freq f ON a.nospace = f.nospace
-                WHERE length(a.nospace) >= 5 AND a.entity_id <> b.entity_id
-            ) TO '{fwd10}' (DELIMITER '\t', HEADER true);
-
-            DROP TABLE s2s3_ns_freq;
-        """)
-    ch_files.append(p10)
-
-    # 11. CH11: addr_digits (address digit sets)
-    p11 = tmp / "ch11.tsv"
-    if not p11.exists() or p11.stat().st_size < 100:
-        log.info("  Generating CH11: addr_digits ...")
-        fwd11 = str(p11).replace("\\", "/")
-        con.execute(f"""
-            CREATE TEMP TABLE s2s3_digits_freq AS
-            SELECT addr_nums, COUNT(*) as cnt FROM s2s3n WHERE length(addr_nums) >= 3 GROUP BY addr_nums HAVING COUNT(*) <= 50;
-
-            COPY (
-                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'addr_digits' AS channel
-                FROM s1n a 
-                JOIN s2s3n b ON a.addr_nums = b.addr_nums AND a.country = b.country
-                JOIN s2s3_digits_freq f ON a.addr_nums = f.addr_nums
-                WHERE length(a.addr_nums) >= 3 AND a.entity_id <> b.entity_id
-            ) TO '{fwd11}' (DELIMITER '\t', HEADER true);
-
-            DROP TABLE s2s3_digits_freq;
-        """)
-    ch_files.append(p11)
-
-    # 3. CH3 & 4. CH4: Native SQL Token Unnesting (Blazing Fast, Zero Pandas Memory)
+    # Token channels CH3 & CH4
     p3 = tmp / "ch3.tsv"
     p4 = tmp / "ch4.tsv"
-
     if (not p3.exists() or p3.stat().st_size < 100) or (not p4.exists() or p4.stat().st_size < 100):
-        log.info("  Generating token channels CH3 & CH4 via native DuckDB SQL ...")
-        fwd3 = str(p3).replace("\\", "/")
-        fwd4 = str(p4).replace("\\", "/")
+        log.info("  Generating Token channels (CH3, CH4) ...")
+        MIN_TOK_LEN = 3; MAX_RARE_FREQ = 200; MAX_MED_FREQ = 5000; MIN_MED_SH = 2
 
-        con.execute(f"""
-            CREATE TEMP TABLE s1_tok AS 
-            SELECT entity_id, UNNEST(string_split(name_alphanum, ' ')) AS token 
-            FROM s1n;
+        s23_tok = (s2s3n[["entity_id", "name_alphanum"]]
+                   .assign(token=s2s3n["name_alphanum"].str.split()).explode("token"))
+        s23_tok = s23_tok[s23_tok["token"].str.len() >= MIN_TOK_LEN].copy()
+        freq = s23_tok.groupby("token")["entity_id"].nunique()
+        tok_rare   = s23_tok[s23_tok["token"].isin(freq[freq <= MAX_RARE_FREQ].index)][["token", "entity_id"]].drop_duplicates()
+        tok_medium = s23_tok[s23_tok["token"].isin(
+            freq[(freq > MAX_RARE_FREQ) & (freq <= MAX_MED_FREQ)].index
+        )][["token", "entity_id"]].drop_duplicates()
+        del s23_tok
 
-            CREATE TEMP TABLE tgt_tok AS 
-            SELECT entity_id, UNNEST(string_split(name_alphanum, ' ')) AS token 
-            FROM s2s3n;
+        s1_tok = (s1n[["entity_id", "name_alphanum"]]
+                  .assign(token=s1n["name_alphanum"].str.split()).explode("token"))
+        s1_tok = s1_tok[s1_tok["token"].str.len() >= MIN_TOK_LEN].copy()
 
-            CREATE TEMP TABLE tok_freq AS 
-            SELECT token, COUNT(*) as cnt 
-            FROM tgt_tok 
-            WHERE length(token) >= 3 
-            GROUP BY token;
+        # CH3
+        if not p3.exists() or p3.stat().st_size < 100:
+            db3 = str(tmp / "_ddb3.db")
+            for f in [db3, db3 + ".wal"]:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
+            c3 = duckdb.connect(database=db3)
+            c3.execute("SET memory_limit='12GB'")
+            c3.register("s1_tok", s1_tok)
+            c3.register("tok_rare", tok_rare)
+            fwd3 = str(p3).replace("\\", "/")
+            c3.execute(f"""
+                COPY (
+                    SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'token_rare' AS channel
+                    FROM s1_tok a JOIN tok_rare b ON a.token = b.token
+                    WHERE a.entity_id <> b.entity_id
+                ) TO '{fwd3}' (DELIMITER '\t', HEADER true)
+            """)
+            c3.close()
+            for f in [db3, db3 + ".wal"]:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
 
-            CREATE TEMP TABLE tok_rare AS 
-            SELECT t.entity_id, t.token 
-            FROM tgt_tok t JOIN tok_freq f ON t.token = f.token 
-            WHERE f.cnt <= 200;
+        # CH4
+        if not p4.exists() or p4.stat().st_size < 100:
+            db4 = str(tmp / "_ddb4.db")
+            for f in [db4, db4 + ".wal"]:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
+            c4 = duckdb.connect(database=db4)
+            c4.execute("SET memory_limit='12GB'")
+            c4.register("s1_tok", s1_tok)
+            c4.register("tok_medium", tok_medium)
+            fwd4 = str(p4).replace("\\", "/")
+            c4.execute(f"""
+                COPY (
+                    SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'token_medium' AS channel
+                    FROM s1_tok a JOIN tok_medium b ON a.token = b.token
+                    WHERE a.entity_id <> b.entity_id
+                    GROUP BY a.entity_id, b.entity_id
+                    HAVING COUNT(*) >= {MIN_MED_SH}
+                ) TO '{fwd4}' (DELIMITER '\t', HEADER true)
+            """)
+            c4.close()
+            for f in [db4, db4 + ".wal"]:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
 
-            CREATE TEMP TABLE tok_medium AS 
-            SELECT t.entity_id, t.token 
-            FROM tgt_tok t JOIN tok_freq f ON t.token = f.token 
-            WHERE f.cnt > 200 AND f.cnt <= 5000;
-
-            COPY (
-                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'token_rare' AS channel
-                FROM s1_tok a JOIN tok_rare b ON a.token = b.token
-                WHERE a.entity_id <> b.entity_id
-            ) TO '{fwd3}' (DELIMITER '\t', HEADER true);
-
-            COPY (
-                SELECT a.entity_id AS s1_id, b.entity_id AS target_id, 'token_medium' AS channel
-                FROM s1_tok a JOIN tok_medium b ON a.token = b.token
-                WHERE a.entity_id <> b.entity_id
-                GROUP BY a.entity_id, b.entity_id
-                HAVING COUNT(*) >= 2
-            ) TO '{fwd4}' (DELIMITER '\t', HEADER true);
-
-            DROP TABLE s1_tok;
-            DROP TABLE tgt_tok;
-            DROP TABLE tok_freq;
-            DROP TABLE tok_rare;
-            DROP TABLE tok_medium;
-        """)
+        del s1_tok, tok_rare, tok_medium, freq
+        gc.collect()
 
     ch_files.append(p3)
     ch_files.append(p4)
-    con.close()
 
-    log.info("  11 blocking channels ready in %.1f min.", (time.time() - t0) / 60)
+    log.info("  9 blocking channels ready in %.1f min.", (time.time() - t0) / 60)
     return ch_files
 
 
@@ -512,8 +473,8 @@ def deduplicate_channels_to_flat(ch_files: list[pathlib.Path], out_flat: pathlib
             except: pass
 
     con = duckdb.connect(database=db_u)
-    con.execute("SET memory_limit='8GB'")
-    con.execute("SET threads=8")
+    con.execute("SET memory_limit='14GB'")
+    con.execute(f"SET threads={os.cpu_count() or 4}")
 
     queries = []
     for p in ch_files:
@@ -592,6 +553,7 @@ def generate_fold_features(
     cands_query: str,
     norm_parquet: pathlib.Path,
     out_parquet: pathlib.Path,
+    batch_size: int = 250_000,
 ) -> None:
     """Stream candidate pairs, join with normalized sources in DuckDB, compute features, save to Parquet."""
     if out_parquet.exists() and out_parquet.stat().st_size > 1000:
@@ -617,8 +579,6 @@ def generate_fold_features(
             (s1.country = tgt.country)::FLOAT AS country_match,
             (s1.name_sorted = tgt.name_sorted)::FLOAT AS name_sorted_exact,
             (s1.name_alphanum = tgt.name_alphanum)::FLOAT AS name_alphanum_exact,
-            (s1.nospace = tgt.nospace AND length(s1.nospace) >= 5)::FLOAT AS name_nospace_exact,
-            (s1.addr_nums = tgt.addr_nums AND length(s1.addr_nums) >= 3)::FLOAT AS addr_digits_exact,
             (s1.name_prefix5 = tgt.name_prefix5)::FLOAT AS name_prefix5_exact,
             (s1.addr_prefix4 = tgt.addr_prefix4)::FLOAT AS addr_prefix4_match,
             ((s1.addr_numeric = tgt.addr_numeric) AND length(s1.addr_numeric) >= 2)::FLOAT AS addr_numeric_match,
@@ -630,14 +590,9 @@ def generate_fold_features(
         JOIN read_parquet('{fwd_norm}') tgt ON c.target_id = tgt.entity_id
     """
 
-    reader = con.execute(join_sql).arrow(150000)
-    out_parquet.parent.mkdir(parents=True, exist_ok=True)
-    writer = None
+    reader = con.execute(join_sql).arrow()
+    batches = []
     total_rows = 0
-    total_pos = 0
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
 
     while True:
         try:
@@ -649,24 +604,19 @@ def generate_fold_features(
             continue
 
         df_feat = compute_string_features_fast(df_chunk)
+        batches.append(df_feat)
         total_rows += len(df_feat)
-        total_pos += int(df_feat["label"].sum())
 
-        table = pa.Table.from_pandas(df_feat, preserve_index=False)
-        if writer is None:
-            writer = pq.ParquetWriter(str(out_parquet), table.schema, compression="SNAPPY")
-        writer.write_table(table)
-        del df_chunk, df_feat, table
-
-    if writer is not None:
-        writer.close()
-
-    log.info("  Saved %s: %d pairs (pos=%d) in %.1f s", out_parquet.name, total_rows, total_pos, time.time() - t0)
+    all_df = pd.concat(batches, ignore_index=True)
+    out_parquet.parent.mkdir(parents=True, exist_ok=True)
+    all_df.to_parquet(out_parquet, index=False)
+    log.info("  Saved %s: %d pairs (pos=%d) in %.1f s", out_parquet.name, total_rows, int(all_df['label'].sum()), time.time() - t0)
+    del all_df, batches
     gc.collect()
 
 
 # =============================================================================
-# MODEL TRAINING & MACRO F0.5 TUNING IN CALIBRATED SPACE
+# MODEL TRAINING & MACRO F0.5 TUNING
 # =============================================================================
 
 def compute_macro_f05(
@@ -676,21 +626,12 @@ def compute_macro_f05(
     probs: np.ndarray,
     thresh: float,
 ) -> float:
-    """Compute exact macro-average F0.5 per S1 entity including singletons and target-side deduplication."""
-    mask = probs >= thresh
-    if not np.any(mask):
-        pred_map = {s: set() for s in all_eval_s1_ids}
-    else:
-        above = pd.DataFrame({
-            "s1_id": eval_pairs.loc[mask, "s1_id"].values,
-            "target_id": eval_pairs.loc[mask, "target_id"].values,
-            "prob": probs[mask],
-        }).sort_values("prob", ascending=False).drop_duplicates(subset=["target_id"], keep="first")
-
-        pred_map = {s: set() for s in all_eval_s1_ids}
-        for s, grp in above.groupby("s1_id"):
-            if s in pred_map:
-                pred_map[s] = set(grp["target_id"].tolist()[:15])
+    """Compute exact macro-average F0.5 per S1 entity including singletons."""
+    above = eval_pairs[probs >= thresh]
+    pred_map = {s: set() for s in all_eval_s1_ids}
+    for s, t in zip(above["s1_id"].values, above["target_id"].values):
+        if s in pred_map:
+            pred_map[s].add(t)
 
     scores = []
     for s in all_eval_s1_ids:
@@ -714,102 +655,104 @@ def compute_macro_f05(
 def train_model(
     feat_train: pathlib.Path,
     feat_val: pathlib.Path,
-    feat_cal: pathlib.Path,
     val_s1_ids: set[str],
     gt_map: dict[str, set[str]],
     model_out: pathlib.Path,
-    cal_out: pathlib.Path,
     threshold_out: pathlib.Path,
 ) -> float:
-    """Train LightGBM, fit Isotonic Calibrator on Fold C, and tune threshold directly in calibrated space."""
+    """Train LightGBM and tune threshold on macro-average F0.5."""
     log.info("=== Training LightGBM Classifier ===")
     t0 = time.time()
 
     log.info("  Loading training features %s ...", feat_train.name)
     tr = pd.read_parquet(feat_train)
-    X_tr, y_tr = tr[FEAT_COLS].values.astype("float32"), tr["label"].astype(int).values
-    pos, neg = int(y_tr.sum()), int((y_tr == 0).sum())
-    del tr
-    gc.collect()
-
     log.info("  Loading validation features %s ...", feat_val.name)
     va = pd.read_parquet(feat_val)
-    X_va, y_va = va[FEAT_COLS].values.astype("float32"), va["label"].astype(int).values
-    va_pairs = va[["s1_id", "target_id"]].copy()
-    del va
-    gc.collect()
 
+    X_tr, y_tr = tr[FEAT_COLS].values.astype("float32"), tr["label"].astype(int).values
+    X_va, y_va = va[FEAT_COLS].values.astype("float32"), va["label"].astype(int).values
+
+    pos, neg = int(y_tr.sum()), int((y_tr == 0).sum())
     spw = max(1, neg // max(pos, 1))
     log.info("  Train data: pos=%d, neg=%d, scale_pos_weight=%d", pos, neg, spw)
 
     model = lgb.LGBMClassifier(
         objective="binary",
         boosting_type="gbdt",
-        num_leaves=127,
-        learning_rate=0.03,
-        n_estimators=1000,
-        min_child_samples=20,
+        num_leaves=255,          # Maximum tree complexity (all in)
+        learning_rate=0.02,      # Slower learning for finer precision
+        n_estimators=1500,       # More trees to converge optimally
+        min_child_samples=20,    # Finer leaf node splits
         subsample=0.8,
+        subsample_freq=1,
         colsample_bytree=0.8,
         reg_alpha=0.1,
         reg_lambda=0.1,
         scale_pos_weight=spw,
         random_state=SEED,
-        n_jobs=8,
+        n_jobs=-1,
         verbose=-1,
     )
 
-    log.info("  Fitting LightGBM with early stopping (30 rounds) ...")
+    log.info("  Fitting LightGBM with early stopping (50 rounds) ...")
     model.fit(
         X_tr, y_tr,
         eval_set=[(X_va, y_va)],
-        callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(100)],
+        callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(100)],
     )
 
     model_out.parent.mkdir(parents=True, exist_ok=True)
     model.booster_.save_model(str(model_out))
     log.info("  Model saved to %s (best_iter=%d)", model_out.name, model.best_iteration_)
 
-    # 1. Fit Isotonic Calibrator on Fold C
-    log.info("  Fitting Isotonic Calibrator on %s ...", feat_cal.name)
-    df_c = pd.read_parquet(feat_cal)
-    X_c = df_c[FEAT_COLS].values.astype("float32")
-    y_c = df_c["label"].astype(int).values
-    raw_c = model.booster_.predict(X_c, num_threads=8)
+    # Threshold tuning on MACRO F0.5
+    log.info("  Predicting probabilities on validation set ...")
+    va_probs = model.predict_proba(X_va)[:, 1]
 
-    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-    iso.fit(raw_c, y_c)
-    with open(cal_out, "wb") as f:
-        pickle.dump(iso, f)
-    log.info("  Calibrator saved to %s", cal_out.name)
-    del df_c, X_c, y_c, raw_c
-    gc.collect()
-
-    # 2. Calibrate Fold B probabilities
-    log.info("  Calibrating validation probabilities ...")
-    va_raw = model.booster_.predict(X_va, num_threads=8)
-    va_cal = iso.predict(va_raw)
-
-    # 3. Sweep threshold DIRECTLY IN CALIBRATED SPACE
-    log.info("  Tuning threshold on MACRO F0.5 in calibrated probability space ...")
+    log.info("  Tuning threshold on MACRO F0.5 (including singletons) ...")
     best_score = -1.0
-    best_thresh = 0.30
-    for t in np.arange(0.15, 0.65, 0.02):
-        score = compute_macro_f05(val_s1_ids, gt_map, va_pairs, va_cal, t)
+    best_thresh = 0.50
+    for t in np.arange(0.15, 0.86, 0.02):
+        score = compute_macro_f05(val_s1_ids, gt_map, va[["s1_id", "target_id"]], va_probs, t)
         if score > best_score:
             best_score = score
             best_thresh = t
 
-    log.info("  >>> OPTIMAL MACRO F0.5: %.4f at Calibrated Threshold %.2f <<<", best_score, best_thresh)
+    log.info("  >>> OPTIMAL MACRO F0.5: %.4f at threshold %.2f <<<", best_score, best_thresh)
     threshold_out.write_text(f"{best_thresh:.4f}\n", encoding="utf-8")
     return best_thresh
+
+
+def fit_calibrator(feat_c_path: pathlib.Path, model_path: pathlib.Path, cal_out: pathlib.Path) -> None:
+    """Fit isotonic calibrator on Fold C."""
+    log.info("=== Fitting Isotonic Calibrator on %s ===", feat_c_path.name)
+    df = pd.read_parquet(feat_c_path)
+    X = df[FEAT_COLS].values.astype("float32")
+    y = df["label"].astype(int).values
+
+    booster = lgb.Booster(model_file=str(model_path))
+    raw_probs = booster.predict(X)
+
+    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    iso.fit(raw_probs, y)
+
+    cal_out.parent.mkdir(parents=True, exist_ok=True)
+    with open(cal_out, "wb") as f:
+        pickle.dump(iso, f)
+    log.info("  Calibrator saved to %s", cal_out.name)
 
 
 def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, float]:
     """Execute Steps 1 to 5: train data loading, blocking verification, feature extraction, LightGBM training, and calibration."""
     # 1. Load train data & splits
     log.info("\n[STEP 1] Loading Training Sources & Splits ...")
+    s1_train = pd.read_csv(TRAIN_DIR / "train_source1.tsv", sep="\t", dtype=str, keep_default_na=False)
+    s2_train = pd.read_csv(TRAIN_DIR / "train_source2.tsv", sep="\t", dtype=str, keep_default_na=False)
+    s3_train = pd.read_csv(TRAIN_DIR / "train_source3.tsv", sep="\t", dtype=str, keep_default_na=False)
     gt_df    = pd.read_csv(TRAIN_DIR / "train_ground_truth.tsv", sep="\t", dtype=str, keep_default_na=False)
+
+    log.info("  Train counts: S1=%d, S2=%d, S3=%d, GT=%d", len(s1_train), len(s2_train), len(s3_train), len(gt_df))
+
     split_df = pd.read_csv(ARTS / "entity_split.tsv", sep="\t", dtype=str)
     folds = {fold: set(split_df[split_df["fold"] == fold]["source1_entity_id"]) for fold in ("A", "B", "C", "D")}
 
@@ -824,37 +767,36 @@ def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, floa
     train_norm_cache = ARTS / "train_sources_norm.parquet"
     train_flat = ARTS / "candidate_pairs_all_folds_flat.tsv"
 
-    if train_norm_cache.exists() and train_norm_cache.stat().st_size > 100_000_000:
-        log.info("  Reusing cached normalized training sources %s (%.1f MB)", train_norm_cache.name, train_norm_cache.stat().st_size / 1e6)
+    if train_flat.exists() and train_flat.stat().st_size > 100_000_000:
+        log.info("  Reusing existing flat train candidates %s (%.1f MB)", train_flat.name, train_flat.stat().st_size / 1e6)
     else:
-        log.info("  Normalizing training sources with Unicode NFKD & domain stripping ...")
-        s1_train = pd.read_csv(TRAIN_DIR / "train_source1.tsv", sep="\t", dtype=str, keep_default_na=False)
-        s2_train = pd.read_csv(TRAIN_DIR / "train_source2.tsv", sep="\t", dtype=str, keep_default_na=False)
-        s3_train = pd.read_csv(TRAIN_DIR / "train_source3.tsv", sep="\t", dtype=str, keep_default_na=False)
-        s1n = normalize_sources(s1_train)
-        s2n = normalize_sources(s2_train)
-        s3n = normalize_sources(s3_train)
-        del s1_train, s2_train, s3_train
-        s2s3n = pd.concat([s2n, s3n], ignore_index=True)
-        del s2n, s3n
-        all_train_norm = pd.concat([s1n, s2s3n], ignore_index=True)
-        all_train_norm.to_parquet(train_norm_cache, index=False)
+        if train_norm_cache.exists():
+            log.info("  Loading cached normalized training sources ...")
+            all_train_norm = pd.read_parquet(train_norm_cache)
+            s1n = all_train_norm[all_train_norm["entity_id"].str.startswith("S1-")].copy()
+            s2s3n = all_train_norm[~all_train_norm["entity_id"].str.startswith("S1-")].copy()
+        else:
+            log.info("  Normalizing training sources ...")
+            s1n = normalize_sources(s1_train)
+            s2n = normalize_sources(s2_train)
+            s3n = normalize_sources(s3_train)
+            s2s3n = pd.concat([s2n, s3n], ignore_index=True)
+            del s2n, s3n
+            all_train_norm = pd.concat([s1n, s2s3n], ignore_index=True)
+            all_train_norm.to_parquet(train_norm_cache, index=False)
+        ch_files = build_blocking_channels(s1n, s2s3n, TMP_TRAIN)
+        deduplicate_channels_to_flat(ch_files, train_flat)
         del s1n, s2s3n, all_train_norm
         gc.collect()
 
-    if not (train_flat.exists() and train_flat.stat().st_size > 100_000_000):
-        ch_files = build_blocking_channels(train_norm_cache, TMP_TRAIN)
-        deduplicate_channels_to_flat(ch_files, train_flat)
-
-    # Verify Recall on Fold D
-    log.info("\n[STEP 2] Verifying Candidate Recall on Fold D ...")
+    # Verify Phase 4 Recall on Fold D
+    log.info("\n[STEP 2] Verifying Phase 4 Recall on Fold D ...")
     con = duckdb.connect()
-    con.execute("SET memory_limit='8GB'")
-    con.execute("SET threads=8")
+    con.execute("SET memory_limit='12GB'")
+    con.execute(f"SET threads={os.cpu_count() or 4}")
     con.register("split_df", split_df)
     con.register("gt_df", gt_df)
 
-    fwd_flat = str(train_flat).replace("\\", "/")
     found_d, total_d = con.execute(f"""
         WITH gt_d AS (
             SELECT g.source1_entity_id AS s1_id, UNNEST(string_split(g.matched_entity_ids, ',')) AS target_id
@@ -863,19 +805,20 @@ def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, floa
             WHERE s.fold = 'D' AND g.matched_entity_ids <> ''
         ),
         cand AS (
-            SELECT s1_id, target_id FROM read_csv('{fwd_flat}', delim='\t', header=true, columns={{'s1_id': 'VARCHAR', 'target_id': 'VARCHAR', 'channel': 'VARCHAR'}})
+            SELECT s1_id, target_id FROM read_csv_auto('{str(train_flat).replace(chr(92), "/")}', delim='\t')
             WHERE s1_id IN (SELECT s1_id FROM gt_d)
         )
         SELECT COUNT(c.target_id), (SELECT COUNT(*) FROM gt_d)
         FROM gt_d g JOIN cand c ON g.s1_id = c.s1_id AND g.target_id = c.target_id
     """).fetchone()
     recall_d = found_d / total_d if total_d > 0 else 0.0
-    log.info("  >>> CANDIDATE RECALL ON FOLD D: %d / %d (%.2f%%) <<<", found_d, total_d, recall_d * 100)
+    log.info("  >>> PHASE 4 RECALL ON FOLD D: %d / %d (%.2f%%) <<<", found_d, total_d, recall_d * 100)
 
     # Feature extraction for Folds A, B, C using DuckDB joins
     log.info("\n[STEP 3] Fast Feature Extraction for Folds A, B, C ...")
+    fwd_flat = str(train_flat).replace("\\", "/")
 
-    # Fold A query: all true positives + 1.2M blocker negatives
+    # Fold A query: all true positives + ~1.2M blocker negatives (downsampled slightly for speed)
     query_fold_a = f"""
         WITH gt_a AS (
             SELECT g.source1_entity_id AS s1_id, UNNEST(string_split(g.matched_entity_ids, ',')) AS target_id, 1 AS label
@@ -885,7 +828,7 @@ def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, floa
         ),
         neg_a AS (
             SELECT c.s1_id, c.target_id, 0 AS label
-            FROM read_csv('{fwd_flat}', delim='\t', header=true, columns={{'s1_id': 'VARCHAR', 'target_id': 'VARCHAR', 'channel': 'VARCHAR'}}) c
+            FROM read_csv_auto('{fwd_flat}', delim='\t') c
             JOIN split_df s ON c.s1_id = s.source1_entity_id
             WHERE s.fold = 'A' AND random() < 0.20
         )
@@ -899,7 +842,7 @@ def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, floa
     feat_a = ARTS / "features_fold_a.parquet"
     generate_fold_features(con, query_fold_a, train_norm_cache, feat_a)
 
-    # Fold B query: all true positives in B + blocker negatives (20% sampled)
+    # Fold B query: all true positives in B + all blocker negatives
     query_fold_b = f"""
         WITH gt_b AS (
             SELECT g.source1_entity_id AS s1_id, UNNEST(string_split(g.matched_entity_ids, ',')) AS target_id, 1 AS label
@@ -909,9 +852,9 @@ def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, floa
         ),
         neg_b AS (
             SELECT c.s1_id, c.target_id, 0 AS label
-            FROM read_csv('{fwd_flat}', delim='\t', header=true, columns={{'s1_id': 'VARCHAR', 'target_id': 'VARCHAR', 'channel': 'VARCHAR'}}) c
+            FROM read_csv_auto('{fwd_flat}', delim='\t') c
             JOIN split_df s ON c.s1_id = s.source1_entity_id
-            WHERE s.fold = 'B' AND random() < 0.20
+            WHERE s.fold = 'B'
         )
         SELECT s1_id, target_id, label FROM gt_b
         UNION ALL
@@ -923,7 +866,7 @@ def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, floa
     feat_b = ARTS / "features_fold_b.parquet"
     generate_fold_features(con, query_fold_b, train_norm_cache, feat_b)
 
-    # Fold C query: all true positives + blocker negatives (20% sampled) for calibration
+    # Fold C query: all true positives + all blocker negatives for perfect calibration
     query_fold_c = f"""
         WITH gt_c AS (
             SELECT g.source1_entity_id AS s1_id, UNNEST(string_split(g.matched_entity_ids, ',')) AS target_id, 1 AS label
@@ -933,9 +876,9 @@ def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, floa
         ),
         neg_c AS (
             SELECT c.s1_id, c.target_id, 0 AS label
-            FROM read_csv('{fwd_flat}', delim='\t', header=true, columns={{'s1_id': 'VARCHAR', 'target_id': 'VARCHAR', 'channel': 'VARCHAR'}}) c
+            FROM read_csv_auto('{fwd_flat}', delim='\t') c
             JOIN split_df s ON c.s1_id = s.source1_entity_id
-            WHERE s.fold = 'C' AND random() < 0.20
+            WHERE s.fold = 'C'
         )
         SELECT s1_id, target_id, label FROM gt_c
         UNION ALL
@@ -947,24 +890,26 @@ def run_training_stage() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, floa
     feat_c = ARTS / "features_fold_c.parquet"
     generate_fold_features(con, query_fold_c, train_norm_cache, feat_c)
 
-    # Train LightGBM & Sweep Threshold on Fold B in calibrated space
-    log.info("\n[STEP 4] LightGBM Model Training & Calibrated Threshold Sweep ...")
+    # Train LightGBM & Sweep Threshold on Fold B
+    log.info("\n[STEP 4] LightGBM Model Training ...")
     model_path = ARTS / "lgbm_model.txt"
     thresh_path = ARTS / "threshold.txt"
-    cal_path = ARTS / "calibrator.pkl"
-
     best_thresh = train_model(
         feat_a,
         feat_b,
-        feat_c,
         folds["B"],
         gt_map,
         model_path,
-        cal_path,
         thresh_path,
     )
 
-    del gt_df, split_df, gt_map
+    # Calibration on Fold C
+    log.info("\n[STEP 5] Isotonic Calibration ...")
+    cal_path = ARTS / "calibrator.pkl"
+    fit_calibrator(feat_c, model_path, cal_path)
+
+    # Clean up train data memory before test inference
+    del s1_train, s2_train, s3_train, gt_df, split_df, gt_map
     gc.collect()
 
     return model_path, thresh_path, cal_path, best_thresh
@@ -1008,8 +953,6 @@ def stream_score_test_candidates(
             (s1.country = tgt.country)::FLOAT AS country_match,
             (s1.name_sorted = tgt.name_sorted)::FLOAT AS name_sorted_exact,
             (s1.name_alphanum = tgt.name_alphanum)::FLOAT AS name_alphanum_exact,
-            (s1.nospace = tgt.nospace AND length(s1.nospace) >= 5)::FLOAT AS name_nospace_exact,
-            (s1.addr_nums = tgt.addr_nums AND length(s1.addr_nums) >= 3)::FLOAT AS addr_digits_exact,
             (s1.name_prefix5 = tgt.name_prefix5)::FLOAT AS name_prefix5_exact,
             (s1.addr_prefix4 = tgt.addr_prefix4)::FLOAT AS addr_prefix4_match,
             ((s1.addr_numeric = tgt.addr_numeric) AND length(s1.addr_numeric) >= 2)::FLOAT AS addr_numeric_match,
@@ -1020,7 +963,7 @@ def stream_score_test_candidates(
         JOIN read_parquet('{fwd_norm}') tgt ON c.target_id = tgt.entity_id
     """
 
-    reader = con.execute(query).arrow(150000)
+    reader = con.execute(query).arrow(200000)
     passing_dfs = []
     batch_idx = 0
     total_scored = 0
@@ -1040,10 +983,10 @@ def stream_score_test_candidates(
 
         df_feat = compute_string_features_fast(df_chunk)
         X = df_feat[FEAT_COLS].values.astype(np.float32)
-        raw_probs = booster.predict(X, num_threads=8)
+        raw_probs = booster.predict(X, num_threads=10)
         cal_probs = iso.predict(raw_probs)
 
-        # Filter strictly above calibrated threshold
+        # Filter strictly above threshold
         mask = cal_probs >= threshold
         if np.any(mask):
             pass_df = pd.DataFrame({
@@ -1068,9 +1011,9 @@ def resolve_matches_and_candidates(
     all_test_s1_ids: list[str],
     matching_out: pathlib.Path,
     cand_pairs_out: pathlib.Path,
-    threshold: float = 0.30,
+    threshold: float = 0.5,
 ) -> None:
-    """Apply greedy target deduplication, hard capping at 15 matches, and write both compliant TSVs."""
+    """Apply greedy target deduplication, score-gap abstention, and write both compliant matching_results.tsv and candidate_pairs.tsv."""
     log.info("=== Resolving Final Matches and Candidates ===")
     t0 = time.time()
 
@@ -1079,13 +1022,14 @@ def resolve_matches_and_candidates(
     if not passing_pairs.empty:
         passing_pairs = passing_pairs.sort_values("cal_prob", ascending=False).drop_duplicates(subset=["target_id"], keep="first")
         log.info("  Pairs after target deduplication: %d", len(passing_pairs))
+        
 
     pred_map = {s: [] for s in all_test_s1_ids}
     if not passing_pairs.empty:
         # Sort again by s1_id and cal_prob descending to cap at top 15 matches per S1
         passing_pairs = passing_pairs.sort_values(["s1_id", "cal_prob"], ascending=[True, False])
         for s, grp in passing_pairs.groupby("s1_id"):
-            # Hard cap at 15 matches to eliminate runaway false positives
+            # Max matches in train is 11. Hard cap at 15 to prevent explosion.
             pred_map[s] = grp["target_id"].tolist()[:15]
 
     # 1. Write matching_results.tsv
@@ -1102,6 +1046,7 @@ def resolve_matches_and_candidates(
     log.info("  Writing %s with match prioritization ...", cand_pairs_out.name)
     fwd_test_flat = str(test_flat_path).replace("\\", "/")
     
+    # Extract top 95 candidate IDs from test_flat
     top_cands = con_test.execute(f"""
         WITH ranked AS (
             SELECT s1_id, target_id,
@@ -1155,7 +1100,7 @@ def main():
 
     t_total = time.time()
     log.info("======================================================================")
-    log.info("STARTING COMPLETE END-TO-END BUSINESS ENTITY RESOLUTION PIPELINE (0.99)")
+    log.info("STARTING COMPLETE END-TO-END BUSINESS ENTITY RESOLUTION PIPELINE")
     log.info("======================================================================")
 
     model_path = ARTS / "lgbm_model.txt"
@@ -1193,18 +1138,24 @@ def main():
         gc.collect()
 
     # Test blocking
-    log.info("\n[STEP 7] Test 11-Channel Blocking ...")
+    log.info("\n[STEP 7] Test 9-Channel Blocking ...")
     test_flat = ARTS / "test_candidates_flat.tsv"
     if not (test_flat.exists() and test_flat.stat().st_size > 50_000_000):
+        all_test_norm = pd.read_parquet(test_norm_cache)
+        ts1n = all_test_norm[all_test_norm["entity_id"].str.startswith("S1-")].copy()
+        ts2s3n = all_test_norm[~all_test_norm["entity_id"].str.startswith("S1-")].copy()
+        del all_test_norm
         TMP_TEST = ARTS / "_tmp_test_channels"
-        test_ch_files = build_blocking_channels(test_norm_cache, TMP_TEST)
+        test_ch_files = build_blocking_channels(ts1n, ts2s3n, TMP_TEST)
         deduplicate_channels_to_flat(test_ch_files, test_flat)
+        del ts1n, ts2s3n
+        gc.collect()
 
     # Test candidate scoring with streaming memory-efficient inference
     log.info("\n[STEP 8] Streaming & Scoring Test Candidates ...")
     con_test = duckdb.connect()
-    con_test.execute("SET memory_limit='8GB'")
-    con_test.execute("SET threads=8")
+    con_test.execute("SET memory_limit='14GB'")
+    con_test.execute(f"SET threads={os.cpu_count() or 4}")
 
     passing_pairs = stream_score_test_candidates(
         con_test,
@@ -1222,8 +1173,8 @@ def main():
     matching_results_path = OUT_DIR / "matching_results.tsv"
     cand_pairs_path = OUT_DIR / "candidate_pairs.tsv"
     con_resolve = duckdb.connect()
-    con_resolve.execute("SET memory_limit='8GB'")
-    con_resolve.execute("SET threads=8")
+    con_resolve.execute("SET memory_limit='14GB'")
+    con_resolve.execute(f"SET threads={os.cpu_count() or 4}")
     resolve_matches_and_candidates(
         con_resolve,
         passing_pairs,
